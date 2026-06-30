@@ -31,7 +31,7 @@ For details on how to configure and use the RoboSense LiDAR specific to the M20 
 Do **not** install `libgoogle-glog-dev` from apt — it conflicts with the thirdparty glog v0.6.0 (both register the same gflags flags at startup, causing a crash on launch). Install everything else:
 
 ```bash
-sudo apt install -y libopencv-dev libpcl-dev pcl-tools libyaml-cpp-dev libepoxy-dev libgflags-dev python3-wheel ros-humble-pcl-conversions 
+sudo apt install -y libopencv-dev libpcl-dev pcl-tools libyaml-cpp-dev libepoxy-dev libgflags-dev python3-wheel ros-foxy-pcl-conversions 
 ```
 
 If `libgoogle-glog-dev` is already installed, remove it:
@@ -67,8 +67,8 @@ cd ../../../../..
 
 **Standard build** (PC/Server with sufficient RAM):
 ```bash
-source /opt/ros/humble/setup.bash
-colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release
+# source /opt/ros/humble/setup.bash
+colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release --packages-select lightning --symlink-install
 source install/setup.bash
 ```
 
