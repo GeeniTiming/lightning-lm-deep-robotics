@@ -75,8 +75,8 @@ source install/setup.bash
 **Low memory build** (recommended for on-board computers such as M20/RK3588, to avoid OOM crashes):
 ```bash
 export MAKEFLAGS="-j3"
-source /opt/ros/humble/setup.bash
-colcon build --parallel-workers 3 --executor sequential --cmake-args -DCMAKE_BUILD_TYPE=Release
+# source /opt/ros/humble/setup.bash
+colcon build --parallel-workers 3 --executor sequential --cmake-args -DCMAKE_BUILD_TYPE=Release --packages-select lightning --symlink-install
 source install/setup.bash
 ```
 Compilation on RK3588 takes approximately 10 minutes; using 4 cores may hang the system due to Out of Memory (OOM) issues.
