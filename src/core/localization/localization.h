@@ -4,6 +4,7 @@
 #include "std_msgs/msg/int32.hpp"
 
 #include "common/imu.h"
+#include "common/std_types.h"
 #include "core/lio/laser_mapping.h"
 #include "core/localization/localization_result.h"
 #include "core/system/async_message_process.h"
@@ -71,8 +72,21 @@ class Localization {
     /// 结束，保存临时地图
     void Finish();
 
-    /// 获取激光的状态
-    NavState GetState() const { return lio_->GetState(); }
+    /// 获取融合定位状态
+    NavState GetState() const { return GetFusedState(); }
+    NavState GetFusedState() const {
+        UL lock(result_mutex_);
+        if (loc_result_.valid_) {
+            return loc_result_.ToNavState();
+        }
+
+        NavState state;
+        state.pose_is_ok_ = false;
+        return state;
+    }
+
+    /// 获取激光里程计状态，供调试使用
+    NavState GetLIOState() const { return lio_->GetState(); }
 
     std::shared_ptr<LaserMapping> GetLIO() { return lio_; }
     std::shared_ptr<LidarLoc> GetLidarLoc() { return lidar_loc_; }
@@ -96,7 +110,8 @@ class Localization {
 
    private:
     /// 模块  ========================================================================================================
-    std::mutex global_mutex_;  // 防止处理过程中被重复init
+    std::mutex global_mutex_;          // 防止处理过程中被重复init
+    mutable std::mutex result_mutex_;  // 保护融合定位输出
     Options options_;
 
     /// 预处理

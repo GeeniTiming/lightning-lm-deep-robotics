@@ -168,8 +168,8 @@ void LocSystem::ProcessLidar(const sensor_msgs::msg::PointCloud2::SharedPtr &clo
             ns.velocity.x = state.vel_.x();
             ns.velocity.y = state.vel_.y();
             ns.velocity.z = state.vel_.z();
-            ns.confidence = 1.0;
-            ns.pose_is_ok = true;
+            ns.confidence = state.confidence_;
+            ns.pose_is_ok = state.pose_is_ok_;
             nav_state_pub_->publish(ns);
 
             if (tf_broadcaster_ != nullptr) {
@@ -276,8 +276,8 @@ void LocSystem::ProcessLidar(const livox_ros_driver2::msg::CustomMsg::SharedPtr 
             ns.velocity.x = state.vel_.x();
             ns.velocity.y = state.vel_.y();
             ns.velocity.z = state.vel_.z();
-            ns.confidence = 1.0;
-            ns.pose_is_ok = true;
+            ns.confidence = state.confidence_;
+            ns.pose_is_ok = state.pose_is_ok_;
             nav_state_pub_->publish(ns);
 
             if (tf_broadcaster_ != nullptr) {

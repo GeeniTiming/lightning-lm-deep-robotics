@@ -90,15 +90,18 @@ bool Localization::Init(const std::string& yaml_path, const std::string& global_
         //             // LOG_EVERY_N(INFO, 10) << "loc fps: " << loc_fps;
         //         }
 
-        loc_result_ = res;
+        {
+            UL lock(result_mutex_);
+            loc_result_ = res;
+        }
 
-        if (tf_callback_ && loc_result_.valid_) {
-            tf_callback_(loc_result_.ToGeoMsg());
+        if (tf_callback_ && res.valid_) {
+            tf_callback_(res.ToGeoMsg());
         }
 
         if (ui_) {
-            ui_->UpdateNavState(loc_result_.ToNavState());
-            ui_->UpdateRecentPose(loc_result_.pose_);
+            ui_->UpdateNavState(res.ToNavState());
+            ui_->UpdateRecentPose(res.pose_);
         }
     });
 
