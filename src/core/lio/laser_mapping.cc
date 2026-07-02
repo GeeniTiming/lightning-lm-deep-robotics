@@ -1,6 +1,7 @@
 #include <pcl/common/transforms.h>
 #include <yaml-cpp/yaml.h>
 #include <fstream>
+#include <iomanip>
 
 #include "common/options.h"
 #include "core/lightning_math.hpp"
@@ -68,6 +69,25 @@ bool LaserMapping::LoadParamsFromYAML(const std::string &yaml_file) {
 
         skip_lidar_num_ = yaml["fasterlio"]["skip_lidar_num"].as<int>();
         enable_skip_lidar_ = skip_lidar_num_ > 0;
+        min_effective_points_ =
+            yaml["fasterlio"]["min_effective_points"] ? yaml["fasterlio"]["min_effective_points"].as<int>() : 100;
+        max_lidar_update_translation_ = yaml["fasterlio"]["max_lidar_update_translation"]
+                                            ? yaml["fasterlio"]["max_lidar_update_translation"].as<double>()
+                                            : 1.0;
+        max_lidar_update_rotation_deg_ = yaml["fasterlio"]["max_lidar_update_rotation_deg"]
+                                             ? yaml["fasterlio"]["max_lidar_update_rotation_deg"].as<double>()
+                                             : 15.0;
+        max_extrinsic_update_translation_ = yaml["fasterlio"]["max_extrinsic_update_translation"]
+                                                ? yaml["fasterlio"]["max_extrinsic_update_translation"].as<double>()
+                                                : 0.02;
+        max_extrinsic_update_rotation_deg_ = yaml["fasterlio"]["max_extrinsic_update_rotation_deg"]
+                                                 ? yaml["fasterlio"]["max_extrinsic_update_rotation_deg"].as<double>()
+                                                 : 1.0;
+        extrinsic_log_interval_ =
+            yaml["fasterlio"]["extrinsic_log_interval"] ? yaml["fasterlio"]["extrinsic_log_interval"].as<int>() : 50;
+        if (extrinsic_log_interval_ < 1) {
+            extrinsic_log_interval_ = 1;
+        }
 
         float height_max = yaml["roi"]["height_max"].as<float>();
         float height_min = yaml["roi"]["height_min"].as<float>();
@@ -260,6 +280,13 @@ bool LaserMapping::Run() {
     scan_down_world_->resize(cur_pts);
     nearest_points_.resize(cur_pts);
 
+    NavState state_before_lidar_update = kf_.GetX();
+    ESKF::CovType cov_before_lidar_update = kf_.GetP();
+    double lidar_update_translation = 0.0;
+    double lidar_update_rotation_deg = 0.0;
+    double extrinsic_update_translation = 0.0;
+    double extrinsic_update_rotation_deg = 0.0;
+
     Timer::Evaluate(
         [&, this]() {
             // 成员变量预分配
@@ -268,6 +295,8 @@ bool LaserMapping::Run() {
             plane_coef_.resize(cur_pts, Vec4f::Zero());
 
             auto old_state = kf_.GetX();
+            state_before_lidar_update = old_state;
+            cov_before_lidar_update = kf_.GetP();
 
             if (use_imu_orient_) {
                 kf_.Update(ESKF::ObsType::ORIENTATION, 0.01);
@@ -285,7 +314,13 @@ bool LaserMapping::Run() {
             }
 
             SE3 delta = old_state.GetPose().inverse() * state_point_.GetPose();
-            LOG(INFO) << "delta norm: " << delta.translation().norm() << ", " << delta.so3().log().norm() * 180 / M_PI;
+            lidar_update_translation = delta.translation().norm();
+            lidar_update_rotation_deg = delta.so3().log().norm() * 180 / M_PI;
+            extrinsic_update_translation =
+                (state_point_.offset_t_lidar_ - old_state.offset_t_lidar_).norm();
+            extrinsic_update_rotation_deg =
+                (old_state.offset_R_lidar_.inverse() * state_point_.offset_R_lidar_).log().norm() * 180 / M_PI;
+            LOG(INFO) << "delta norm: " << lidar_update_translation << ", " << lidar_update_rotation_deg;
 
             // LOG(INFO) << "old yaw: " << old_state.rot_.angleZ() << ", new: " << state_point_.rot_.angleZ();
 
@@ -294,6 +329,32 @@ bool LaserMapping::Run() {
             pos_lidar_ = state_point_.pos_ + state_point_.rot_ * state_point_.offset_t_lidar_;
         },
         "IEKF Solve and Update");
+
+    if (flg_EKF_inited_ &&
+        (effect_feat_num_ < min_effective_points_ || lidar_update_translation > max_lidar_update_translation_ ||
+         lidar_update_rotation_deg > max_lidar_update_rotation_deg_ ||
+         (extrinsic_est_en_ &&
+          (extrinsic_update_translation > max_extrinsic_update_translation_ ||
+           extrinsic_update_rotation_deg > max_extrinsic_update_rotation_deg_)))) {
+        LOG(WARNING) << "Reject lidar update. effect num: " << effect_feat_num_
+                     << " min: " << min_effective_points_
+                     << " delta translation: " << lidar_update_translation
+                     << " max: " << max_lidar_update_translation_
+                     << " delta rotation deg: " << lidar_update_rotation_deg
+                     << " max: " << max_lidar_update_rotation_deg_
+                     << " extrinsic delta translation: " << extrinsic_update_translation
+                     << " max: " << max_extrinsic_update_translation_
+                     << " extrinsic delta rotation deg: " << extrinsic_update_rotation_deg
+                     << " max: " << max_extrinsic_update_rotation_deg_;
+        kf_.ChangeX(state_before_lidar_update);
+        kf_.ChangeP(cov_before_lidar_update);
+        state_point_ = state_before_lidar_update;
+        return false;
+    }
+
+    if (extrinsic_est_en_) {
+        LogEstimatedExtrinsic();
+    }
 
     // update local map
     Timer::Evaluate([&, this]() { MapIncremental(); }, "    Incremental Mapping");
@@ -365,6 +426,26 @@ void LaserMapping::MakeKF() {
     }
 
     last_kf_ = kf;
+}
+
+void LaserMapping::LogEstimatedExtrinsic() {
+    if ((extrinsic_log_count_++ % extrinsic_log_interval_) != 0) {
+        return;
+    }
+
+    const Mat3d R = state_point_.offset_R_lidar_.matrix();
+    const Vec3d t = state_point_.offset_t_lidar_;
+    const Quatd q = state_point_.offset_R_lidar_.unit_quaternion();
+    const Vec3d ypr = R.eulerAngles(2, 1, 0) * 180.0 / M_PI;
+
+    LOG(INFO) << std::fixed << std::setprecision(6)
+              << "Estimated LiDAR->body extrinsic"
+              << "\n  extrinsic_T: [" << t.x() << ", " << t.y() << ", " << t.z() << "]"
+              << "\n  extrinsic_R: [" << R(0, 0) << ", " << R(0, 1) << ", " << R(0, 2)
+              << ",\n                " << R(1, 0) << ", " << R(1, 1) << ", " << R(1, 2)
+              << ",\n                " << R(2, 0) << ", " << R(2, 1) << ", " << R(2, 2) << "]"
+              << "\n  rpy_deg: roll=" << ypr.z() << " pitch=" << ypr.y() << " yaw=" << ypr.x()
+              << "\n  quat_xyzw: [" << q.x() << ", " << q.y() << ", " << q.z() << ", " << q.w() << "]";
 }
 
 void LaserMapping::ProcessPointCloud2(const sensor_msgs::msg::PointCloud2::SharedPtr &msg) {
@@ -678,9 +759,9 @@ void LaserMapping::ObsModel(NavState &s, ESKF::CustomObservationModel &obs) {
     corr_pts_.resize(effect_feat_num_);
     corr_norm_.resize(effect_feat_num_);
 
-    if (effect_feat_num_ < 1) {
+    if (effect_feat_num_ < min_effective_points_) {
         obs.valid_ = false;
-        LOG(WARNING) << "No Effective Points!";
+        LOG(WARNING) << "Too few effective points: " << effect_feat_num_ << " < " << min_effective_points_;
         return;
     }
 

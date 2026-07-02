@@ -1,6 +1,7 @@
 
 common:
   lidar_topic: "/LIDAR/POINTS"
+  # lidar_topic: "/ALIGNED_POINTS"
   livox_lidar_topic: "/livox/lidar"
   imu_topic: "/IMU"
 
@@ -45,24 +46,25 @@ g2p5:
 
 system:
   with_loop_closing: true # 是否需要回环检测
-  with_ui: true # 是否需要3D UI (RK3588请设为false)
+  with_ui: false # 是否需要3D UI (RK3588请设为false)
   with_2dui: false # 是否需要2D UI
-  with_g2p5: true # 是否需要栅格地图
+  with_g2p5: false # 是否需要栅格地图，在线RViz调试时先关闭，避免RK3588后台建2D图抢算力
   step_on_kf: false # 是否在关键帧处暂停
 
   enable_lidar_loc_skip: false
   log_pose_opt: false # 命令行打印位置和速度
   pub_odom: true
-  enable_lidar_loc_rviz: false # 是否启用RViz点云发布
+  enable_lidar_loc_rviz: true # 是否启用RViz点云发布
   rviz_current_scan_topic: "/current_scan_cloud"
   rviz_global_map_topic: "/global_map_cloud"
+  rviz_global_map_kf_interval: 0 # <=0表示不发布全局点云；先看实时scan/path，稳定后再改成30或60
   enable_path_rviz: true # 是否启用RViz路径发布
   enable_lidar_odom_skip: false
   lidar_loc_skip_num: 4
   lidar_odom_skip_num: 2
   map_path: ./data/zjulib/
   pub_tf: true
-  use_imu_orient: true
+  use_imu_orient: false
 
 loop_closing:
   loop_kf_gap: 10       # 每隔多少个关键帧检查一次

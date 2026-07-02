@@ -1,34 +1,64 @@
-#!/bin/bash
-# cd /home/user/lightning-lm
-# ros2sh='source /opt/ros/humble/setup.bash && source install/setup.bash'
-cd /home/user/lightinglm_ws
-ros2sh='source /opt/robot/scripts/setup_ros2.sh && source install/setup.bash'
-# ros0sh='source /opt/ros/foxy/setup.bash && source install/setup.bash'
+#!/usr/bin/env bash
+set -euo pipefail
 
-# Start a new tmux session named 'lg'
-tmux new-session -d -s lg
+SESSION="${SESSION:-lg}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WS_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
-tmux new-window -t lg:0 -n 'lightning'
-tmux send-keys -t lg:0 "$ros2sh && ros2 run lightning run_slam_online --config src/lightning-lm-deep-robotics/config/default_deep_roboticsslam.yaml" C-m
-# ros2 run lightning run_slam_offline --input_bag ~/Downloads/m20/libraryf/libraryf_0.db3 --config ./src/lightning-lm/config/default_nclt.yaml 2>log/logoffline.txt
+CONFIG="${CONFIG:-src/lightning-lm-deep-robotics/config/default_deep_robotics.yaml}"
+RVIZ_CONFIG="${RVIZ_CONFIG:-src/lightning-lm-deep-robotics/config/showbodypc.rviz}"
+START_RVIZ="${START_RVIZ:-1}"
 
-# Tab 1: Static transform publisher
-tmux new-window -t lg:1 -n 'vis'
-tmux send-keys -t lg:1 "$ros2sh && rviz2 -d src/lightning-lm-deep-robotics/config/showbodypc.rviz" C-m
-# tmux send-keys -t loc:1 "$ros2sh && rviz2 -d src/lightning-lm-deep-robotics/config/showglobalmap.rviz" C-m
+if tmux has-session -t "${SESSION}" 2>/dev/null; then
+    tmux attach-session -t "${SESSION}"
+    exit 0
+fi
 
-# Tab 2: Check node info, save map service
-tmux new-window -t lg:2 -n 'navstate'
-# tmux send-keys -t lg:1 "cd ~/Downloads && ros2 bag play m20/libraryf --clock" C-m
-tmux send-keys -t lg:2 "$ros2sh && sleep 5 && ros2 topic echo /lightning/nav_state" C-m
+cd "${WS_ROOT}"
 
-tmux new-window -t lg:3 -n 'log'
-tmux send-keys -t lg:3 "$ros2sh  && python3 src/lightning-lm-deep-robotics/scripts/ros2_log_navstate.py" C-m
+if [[ -n "${ROS_SETUP:-}" ]]; then
+    ros_setup="${ROS_SETUP}"
+elif [[ -f /opt/robot/scripts/setup_ros2.sh ]]; then
+    ros_setup="/opt/robot/scripts/setup_ros2.sh"
+elif [[ -n "${ROS_DISTRO:-}" && -f "/opt/ros/${ROS_DISTRO}/setup.bash" ]]; then
+    ros_setup="/opt/ros/${ROS_DISTRO}/setup.bash"
+elif [[ -f /opt/ros/foxy/setup.bash ]]; then
+    ros_setup="/opt/ros/foxy/setup.bash"
+elif [[ -f /opt/ros/humble/setup.bash ]]; then
+    ros_setup="/opt/ros/humble/setup.bash"
+else
+    echo "Cannot find a ROS 2 setup file. Set ROS_SETUP=/path/to/setup.bash and retry." >&2
+    exit 1
+fi
 
-tmux new-window -t lg:4 -n 'node_info'
-tmux send-keys -t lg:4 "$ros2sh && exec bash" C-m
-# tmux send-keys -t lg:4 "ros2 service call /lightning/save_map lightning/srv/SaveMap "{map_id: 'office4f'}"" C-m
-# tmux send-keys -t lg:4 "ros2 service call /lightning/save_path lightning/srv/SavePath "{file_path: 'data/traj.txt'}"" C-m
+setup_cmd="source \"${ros_setup}\""
+if [[ -f "${WS_ROOT}/install/setup.bash" ]]; then
+    setup_cmd="${setup_cmd} && source \"${WS_ROOT}/install/setup.bash\""
+fi
 
-# Attach to the tmux session
-tmux attach-session -t lg
+slam_cmd="cd \"${WS_ROOT}\" && ${setup_cmd} && ros2 run lightning run_slam_online --config \"${CONFIG}\""
+rviz_cmd="cd \"${WS_ROOT}\" && ${setup_cmd} && rviz2 -d \"${RVIZ_CONFIG}\""
+navstate_cmd="cd \"${WS_ROOT}\" && ${setup_cmd} && sleep 5 && ros2 topic echo /lightning/nav_state"
+log_cmd="cd \"${WS_ROOT}\" && ${setup_cmd} && python3 src/lightning-lm-deep-robotics/scripts/ros2_log_navstate.py"
+shell_cmd="cd \"${WS_ROOT}\" && ${setup_cmd} && exec bash"
+
+tmux new-session -d -s "${SESSION}" -n "lightning"
+tmux send-keys -t "${SESSION}:0" "${slam_cmd}" C-m
+
+tmux new-window -t "${SESSION}:" -n "vis"
+if [[ "${START_RVIZ}" == "1" ]]; then
+    tmux send-keys -t "${SESSION}:vis" "${rviz_cmd}" C-m
+else
+    tmux send-keys -t "${SESSION}:vis" "${shell_cmd}" C-m
+fi
+
+tmux new-window -t "${SESSION}:" -n "navstate"
+tmux send-keys -t "${SESSION}:navstate" "${navstate_cmd}" C-m
+
+tmux new-window -t "${SESSION}:" -n "log"
+tmux send-keys -t "${SESSION}:log" "${log_cmd}" C-m
+
+tmux new-window -t "${SESSION}:" -n "node_info"
+tmux send-keys -t "${SESSION}:node_info" "${shell_cmd}" C-m
+
+tmux attach-session -t "${SESSION}"

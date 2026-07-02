@@ -222,11 +222,27 @@ So that we use `run_slam_online` node.
 
 
 ### 7.1 One-command Launch
-To monitor the SLAM program in one single remote terminal, use the following command to launch 4 tmux windows at once (stay at your workspace folder which is the parent folder of the src folder): 
+To monitor the SLAM program in one single remote terminal, use the following command to launch a tmux session with SLAM, RViz, nav_state, logging, and a spare shell:
 ```bash
 ./src/lightning-lm-deep-robotics/start_lg_rviz_session.sh
 ```
-This opens a session named `lg`. Switch between windows using `Ctrl+b n`. If a command fails, you can manually re-enter it as described in the next section.
+This opens a session named `lg`. Switch between windows using `Ctrl+b n`. If the RK3588 board is running headless, disable RViz in the tmux session and run RViz on a display-capable PC connected to the same ROS 2 network:
+```bash
+# on the robot
+START_RVIZ=0 ./src/lightning-lm-deep-robotics/start_lg_rviz_session.sh
+
+# on the display-capable PC
+ros2 launch lightning rviz.launch.py
+```
+
+If you prefer ROS 2 launch directly:
+```bash
+ros2 launch lightning slam_online.launch.py
+```
+Use `rviz:=false` when launching SLAM on a headless robot:
+```bash
+ros2 launch lightning slam_online.launch.py rviz:=false
+```
 
 Further instructions see [tmux session usage](#94-tmux-session-usage)
 
@@ -353,6 +369,11 @@ The currentScan is transformed to the global 'map' frame and processed by Undist
 
 Note: rviz2 works on MobaXterm, not on VSCode.
 
+You can also start the same RViz layout through launch after rebuilding and sourcing the workspace:
+```bash
+ros2 launch lightning rviz.launch.py
+```
+
 #### 9.5.1 Reconnected rviz2
 If the network connection is interrupted due to a failure and the next time reconnected, you can restart RViz2 as follows:
 ```bash
@@ -360,5 +381,3 @@ source /opt/robot/scripts/setup_ros2.sh
 pkill -f rviz2
 rviz2 -d src/lightning-lm-deep-robotics/config/showbodypc.rviz
 ```
-
-

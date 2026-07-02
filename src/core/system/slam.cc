@@ -41,6 +41,8 @@ bool SlamSystem::Init(const std::string& yaml_path) {
     options_.log_pose_opt_ = yaml["system"]["log_pose_opt"] ? yaml["system"]["log_pose_opt"].as<bool>() : false;
     options_.enable_lidar_rviz_ = yaml["system"]["enable_lidar_loc_rviz"] ? yaml["system"]["enable_lidar_loc_rviz"].as<bool>() : false;
     options_.enable_path_rviz_ = yaml["system"]["enable_path_rviz"] ? yaml["system"]["enable_path_rviz"].as<bool>() : false;
+    options_.rviz_global_map_kf_interval_ =
+        yaml["system"]["rviz_global_map_kf_interval"] ? yaml["system"]["rviz_global_map_kf_interval"].as<int>() : 3;
     options_.use_imu_init_ = yaml["system"]["use_imu_orient"] ? yaml["system"]["use_imu_orient"].as<bool>() : false;
     if(options_.enable_lidar_rviz_ && !options_.enable_path_rviz_) {
         options_.enable_path_rviz_ = true; // 发布路径时会包含位姿信息，方便调试
@@ -57,6 +59,7 @@ bool SlamSystem::Init(const std::string& yaml_path) {
               << "\n  pub_tf: " << options_.pub_tf_
               << "\n  enable_lidar_rviz: " << options_.enable_lidar_rviz_
               << "\n  enable_path_rviz: " << options_.enable_path_rviz_
+              << "\n  rviz_global_map_kf_interval: " << options_.rviz_global_map_kf_interval_
               << "\n  step_on_kf: " << options_.step_on_kf_
               << "\n  log_pose_opt: " << options_.log_pose_opt_
               << "\n  use_imu_init: " << options_.use_imu_init_;
@@ -131,11 +134,13 @@ bool SlamSystem::Init(const std::string& yaml_path) {
         cloud_topic_ = yaml["common"]["lidar_topic"].as<std::string>();
         livox_topic_ = yaml["common"]["livox_lidar_topic"].as<std::string>();
 
-        rclcpp::QoS qos(10);
-        // qos.best_effort();
+        rclcpp::QoS imu_qos(rclcpp::KeepLast(1000));
+        imu_qos.best_effort();
+        rclcpp::QoS lidar_qos(rclcpp::KeepLast(1));
+        lidar_qos.best_effort();
 
         imu_sub_ = node_->create_subscription<sensor_msgs::msg::Imu>(
-            imu_topic_, qos, [this](sensor_msgs::msg::Imu::SharedPtr msg) {
+            imu_topic_, imu_qos, [this](sensor_msgs::msg::Imu::SharedPtr msg) {
                 IMUPtr imu = std::make_shared<IMU>();
                 imu->timestamp = ToSec(msg->header.stamp);
                 imu->linear_acceleration =
@@ -149,12 +154,12 @@ bool SlamSystem::Init(const std::string& yaml_path) {
             });
 
         cloud_sub_ = node_->create_subscription<sensor_msgs::msg::PointCloud2>(
-            cloud_topic_, qos, [this](sensor_msgs::msg::PointCloud2::SharedPtr cloud) {
+            cloud_topic_, lidar_qos, [this](sensor_msgs::msg::PointCloud2::SharedPtr cloud) {
                 Timer::Evaluate([&]() { ProcessLidar(cloud); }, "Proc Lidar", true);
             });
 
         livox_sub_ = node_->create_subscription<livox_ros_driver2::msg::CustomMsg>(
-            livox_topic_, qos, [this](livox_ros_driver2::msg::CustomMsg ::SharedPtr cloud) {
+            livox_topic_, lidar_qos, [this](livox_ros_driver2::msg::CustomMsg ::SharedPtr cloud) {
                 Timer::Evaluate([&]() { ProcessLidar(cloud); }, "Proc Lidar", true);
             });
 
@@ -366,7 +371,9 @@ void SlamSystem::ProcessLidar(const sensor_msgs::msg::PointCloud2::SharedPtr& cl
     }
 
     lio_->ProcessPointCloud2(cloud);
-    lio_->Run();
+    if (!lio_->Run()) {
+        return;
+    }
 
     if (options_.log_pose_opt_) {
         auto state = lio_->GetState();
@@ -437,7 +444,7 @@ void SlamSystem::ProcessLidar(const sensor_msgs::msg::PointCloud2::SharedPtr& cl
                           << ns.pose.position.x << ", " << ns.pose.position.y << ", " << ns.pose.position.z<< "]";
                 count++;
             }
-            ps.header = cloud->header;
+            ps.header = ns.header;
             ps.pose = ns.pose;
             path_.header = ns.header;
             path_.poses.push_back(ps);
@@ -503,9 +510,9 @@ void SlamSystem::ProcessLidar(const sensor_msgs::msg::PointCloud2::SharedPtr& cl
         ui_->UpdateKF(cur_kf_);
     }
 
-    if (map_pub_ != nullptr) {
+    if (map_pub_ != nullptr && options_.rviz_global_map_kf_interval_ > 0) {
         static int kf_count = 0;
-        if (kf_count++ % 3 == 0) { // 每3个关键帧发布一个全局地图
+        if (kf_count++ % options_.rviz_global_map_kf_interval_ == 0) {
             auto global_map = lio_->GetGlobalMap(!options_.with_loop_closing_);
             sensor_msgs::msg::PointCloud2 ros_map;
             pcl::toROSMsg(*global_map, ros_map);
@@ -522,7 +529,9 @@ void SlamSystem::ProcessLidar(const livox_ros_driver2::msg::CustomMsg::SharedPtr
     }
 
     lio_->ProcessPointCloud2(cloud);
-    lio_->Run();
+    if (!lio_->Run()) {
+        return;
+    }
 
     if (options_.log_pose_opt_) {
         auto state = lio_->GetState();
@@ -588,7 +597,7 @@ void SlamSystem::ProcessLidar(const livox_ros_driver2::msg::CustomMsg::SharedPtr
 
         if (options_.enable_path_rviz_ && path_pub_ != nullptr) {
             geometry_msgs::msg::PoseStamped ps;
-            ps.header = cloud->header;
+            ps.header = ns.header;
             ps.pose = ns.pose;
             path_.header = ns.header;
             path_.poses.push_back(ps);
@@ -654,9 +663,9 @@ void SlamSystem::ProcessLidar(const livox_ros_driver2::msg::CustomMsg::SharedPtr
         ui_->UpdateKF(cur_kf_);
     }
 
-    if (map_pub_ != nullptr) {
+    if (map_pub_ != nullptr && options_.rviz_global_map_kf_interval_ > 0) {
         static int kf_count_livox = 0;
-        if (kf_count_livox++ % 3 == 0) { // 每3个关键帧发布一个全局地图
+        if (kf_count_livox++ % options_.rviz_global_map_kf_interval_ == 0) {
             auto global_map = lio_->GetGlobalMap(!options_.with_loop_closing_);
             sensor_msgs::msg::PointCloud2 ros_map;
             pcl::toROSMsg(*global_map, ros_map);

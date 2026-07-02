@@ -138,6 +138,8 @@ class LaserMapping {
     /// 创建关键帧
     void MakeKF();
 
+    void LogEstimatedExtrinsic();
+
    private:
     Options options_;
 
@@ -204,6 +206,13 @@ class LaserMapping {
     double last_lidar_time_ = 0;
 
     bool use_imu_orient_ = false;
+    int min_effective_points_ = 100;
+    double max_lidar_update_translation_ = 1.0;
+    double max_lidar_update_rotation_deg_ = 15.0;
+    double max_extrinsic_update_translation_ = 0.02;
+    double max_extrinsic_update_rotation_deg_ = 1.0;
+    int extrinsic_log_interval_ = 50;
+    int extrinsic_log_count_ = 0;
 
     ///////////////////////// EKF inputs and output ///////////////////////////////////////////////////////
     MeasureGroup measures_;  // sync IMU and lidar scan

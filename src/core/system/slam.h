@@ -54,6 +54,7 @@ class SlamSystem {
         bool pub_tf_ = false;               // 是否需要发布TF
         bool enable_lidar_rviz_ = false; // 是否需要RViz可视化点云
         bool enable_path_rviz_ = false;      // 是否发布Path
+        int rviz_global_map_kf_interval_ = 3; // 每隔多少关键帧发布一次全局点云，<=0表示不发布
 
         bool step_on_kf_ = true;  // 是否在关键帧处暂停p
         bool log_pose_opt_ = false; // 是否打印位姿和速度

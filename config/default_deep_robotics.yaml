@@ -10,11 +10,14 @@ fasterlio:
   blind: 0.5                # 盲区，小于盲区距离的不会处理
   time_scale: 1e-3             # 兼容不同数据集的时间单位，仅对Velodyne LiDAR(lidar_type=2)生效
 
-  skip_lidar_num: 0 # 点云的跳帧情况
-  point_filter_num: 6 # 点云采样参数
-  max_iteration: 4 # 最大迭代次数
-  filter_size_scan: 0.5 # 对scan进行的降采样
-  filter_size_map: 0.5
+  skip_lidar_num: 2 # RK3588实时档：处理一帧、跳一帧，10Hz输入约5Hz建图
+  point_filter_num: 10 # 点云采样参数，增大可降低CPU负载
+  max_iteration: 3 # 最大迭代次数
+  min_effective_points: 100 # 低于该有效匹配点数时拒绝雷达更新，避免错误关键帧污染地图
+  max_lidar_update_translation: 1.0 # 单帧雷达更新超过该平移量(m)时拒绝
+  max_lidar_update_rotation_deg: 15.0 # 单帧雷达更新超过该角度(deg)时拒绝
+  filter_size_scan: 0.7 # 对scan进行的降采样
+  filter_size_map: 0.7
 
   ivox_grid_resolution: 0.5        # default=0.2
   ivox_nearby_type: 18             # 6, 18, 26
@@ -27,6 +30,9 @@ fasterlio:
   b_acc_cov: 0.0001
   b_gyr_cov: 0.0001
   extrinsic_est_en: false      # true: enable the online estimation of IMU-LiDAR extrinsic
+  extrinsic_log_interval: 50 # extrinsic_est_en=true时，每隔多少次成功雷达更新打印一次在线估计外参
+  max_extrinsic_update_translation: 0.02 # 单帧外参平移估计超过该值(m)时拒绝
+  max_extrinsic_update_rotation_deg: 1.0 # 单帧外参旋转估计超过该值(deg)时拒绝
   extrinsic_T: [ 0, 0, 0 ]
   extrinsic_R: [ 1, 0, 0,
                  0, 1, 0,
@@ -43,19 +49,26 @@ g2p5:
   grid_map_resolution: 0.2 # 栅格地图分辨率
 
 system:
-  with_loop_closing: true # 是否需要回环检测
-  with_ui: true # 是否需要3D UI (RK3588请设为false)
+  with_loop_closing: false # RK3588先关闭回环，避免在线建图时PGO/回环线程抢算力
+  with_ui: false # 是否需要3D UI (RK3588请设为false)
   with_2dui: false # 是否需要2D UI
   with_g2p5: false # 是否需要栅格地图
   step_on_kf: false # 是否在关键帧处暂停
 
   enable_lidar_loc_skip: false
-  enable_lidar_loc_rviz: false
+  log_pose_opt: false # 命令行打印位置和速度
+  pub_odom: true
+  enable_lidar_loc_rviz: true # 是否启用RViz点云发布
+  rviz_current_scan_topic: "/current_scan_cloud"
+  rviz_global_map_topic: "/global_map_cloud"
+  rviz_global_map_kf_interval: 0 # <=0表示不发布全局点云；先看实时scan/path，稳定后再改成30或60
+  enable_path_rviz: true # 是否启用RViz路径发布
   enable_lidar_odom_skip: false
   lidar_loc_skip_num: 4
   lidar_odom_skip_num: 2
   map_path: ./data/office4f/
-  pub_tf: true
+  pub_tf: false # 机器狗底层已有 map->base_link；关闭 lightning 的 map->lidar_link，避免 RViz TF 冲突
+  use_imu_orient: false
 
 loop_closing:
   loop_kf_gap: 10       # 每隔多少个关键帧检查一次
