@@ -52,7 +52,7 @@ system:
   with_loop_closing: false # RK3588先关闭回环，避免在线建图时PGO/回环线程抢算力
   with_ui: false # 是否需要3D UI (RK3588请设为false)
   with_2dui: false # 是否需要2D UI
-  with_g2p5: false # 是否需要栅格地图
+  with_g2p5: true # 是否需要栅格地图
   step_on_kf: false # 是否在关键帧处暂停
 
   enable_lidar_loc_skip: false
