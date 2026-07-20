@@ -10,18 +10,18 @@ fasterlio:
   blind: 0.5                # 盲区，小于盲区距离的不会处理
   time_scale: 1e-3             # 兼容不同数据集的时间单位，仅对Velodyne LiDAR(lidar_type=2)生效
 
-  skip_lidar_num: 10 # RK3588实时档：处理一帧、跳一帧，10Hz输入约5Hz建图
-  point_filter_num: 30 # 点云采样参数，增大可降低CPU负载
-  max_iteration: 2 # 最大迭代次数
+  skip_lidar_num: 2 # 处理一帧、跳一帧，10Hz输入约5Hz建图
+  point_filter_num: 10 # 保留足够几何结构，避免室内墙角和门框被抽空
+  max_iteration: 3 # 最大迭代次数
   min_effective_points: 100 # 低于该有效匹配点数时拒绝雷达更新，避免错误关键帧污染地图
-  max_lidar_update_translation: 5.0 # 单帧雷达更新超过该平移量(m)时拒绝
+  max_lidar_update_translation: 1.0 # 单帧雷达更新超过该平移量(m)时拒绝
   max_lidar_update_rotation_deg: 15.0 # 单帧雷达更新超过该角度(deg)时拒绝
-  filter_size_scan: 1.0 # 对scan进行的降采样
-  filter_size_map: 1.0
+  filter_size_scan: 0.5 # 对scan进行的降采样
+  filter_size_map: 0.5
 
-  ivox_grid_resolution: 1.0        # default=0.2
+  ivox_grid_resolution: 0.3        # 室内环境保留墙角和窄结构
   ivox_nearby_type: 18             # 6, 18, 26
-  esti_plane_threshold: 0.2        # default=0.1
+  esti_plane_threshold: 0.1        # 点到局部平面的最大残差
 
   use_aa: false  # use anderson-acceleration
 
@@ -38,25 +38,27 @@ fasterlio:
                  0, 1, 0,
                  0, 0, 1 ]
   keep_first_imu_estimation: false
+  robosense_scan_duration: 0.12 # 融合点云只保留消息头之后的单个扫描周期(s)
+  robosense_timestamp_tolerance: 0.005 # 允许点时间略早于消息头(s)
 
 
 g2p5:
   esti_floor: false   # 是否动态估计地面
   lidar_height: 0.0   # 雷达安装高度
-  floor_height: -1.2   # 默认地面高度
-  min_th_floor: 0.50  # 距离地面这个高度的障碍物被扫入栅格地图中
-  max_th_floor: 1.0  # 距离地面这个高度的障碍物被扫入栅格地图中
-  grid_map_resolution: 0.2 # 栅格地图分辨率
+  floor_height: -0.56   # 当前M20融合点云实测地面高度
+  min_th_floor: 0.10  # 地面以上这个高度起作为障碍物
+  max_th_floor: 1.5  # 只使用地面以上该高度内的障碍物
+  grid_map_resolution: 0.1 # 室内栅格地图分辨率
 
 system:
-  with_loop_closing: true # RK3588先关闭回环，避免在线建图时PGO/回环线程抢算力
-  with_ui: false # 是否需要3D UI (RK3588请设为false)
+  with_loop_closing: false # 先保证LIO稳定，回环放到PC离线处理
+  with_ui: true # 是否需要3D UI (RK3588请设为false)
   with_2dui: false # 是否需要2D UI
   with_g2p5: true # 是否需要栅格地图
   step_on_kf: false # 是否在关键帧处暂停
 
   enable_lidar_loc_skip: false
-  log_pose_opt: false # 命令行打印位置和速度
+  log_pose_opt: true # 命令行打印位置和速度
   pub_odom: true
   enable_lidar_loc_rviz: true # 是否启用RViz点云发布
   rviz_current_scan_topic: "/current_scan_cloud"

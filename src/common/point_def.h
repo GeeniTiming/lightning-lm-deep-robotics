@@ -18,7 +18,10 @@ struct PointXYZIT {
     PCL_ADD_POINT4D
     PCL_ADD_INTENSITY
     double timestamp;
-    PointXYZIT() {}
+    PointXYZIT() : timestamp(0.0) {
+        x = y = z = intensity = 0.0f;
+        data[3] = 1.0f;
+    }
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 };
 

@@ -18,7 +18,7 @@ fasterlio:
   filter_size_scan: 0.5 # 对scan进行的降采样
   filter_size_map: 0.5
 
-  ivox_grid_resolution: 0.5        # default=0.2
+  ivox_grid_resolution: 0.3        # 室内环境保留墙角和窄结构
   ivox_nearby_type: 18             # 6, 18, 26
   esti_plane_threshold: 0.1        # default=0.1
 
@@ -34,15 +34,17 @@ fasterlio:
                  0, 1, 0,
                  0, 0, 1 ]
   keep_first_imu_estimation: false
+  robosense_scan_duration: 0.12 # 融合点云只保留消息头之后的单个扫描周期(s)
+  robosense_timestamp_tolerance: 0.005 # 允许点时间略早于消息头(s)
 
 
 g2p5:
   esti_floor: false   # 是否动态估计地面
   lidar_height: 0.0   # 雷达安装高度
-  floor_height: -1.2   # 默认地面高度
-  min_th_floor: 0.50  # 距离地面这个高度的障碍物被扫入栅格地图中
-  max_th_floor: 1.0  # 距离地面这个高度的障碍物被扫入栅格地图中
-  grid_map_resolution: 0.2 # 栅格地图分辨率
+  floor_height: -0.56   # 当前M20融合点云实测地面高度
+  min_th_floor: 0.10  # 地面以上这个高度起作为障碍物
+  max_th_floor: 1.5  # 只使用地面以上该高度内的障碍物
+  grid_map_resolution: 0.1 # 室内栅格地图分辨率
 
 system:
   with_loop_closing: true # 是否需要回环检测

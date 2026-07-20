@@ -129,6 +129,7 @@ class LaserMapping {
         po.y = p_global(1);
         po.z = p_global(2);
         po.intensity = pi.intensity;
+        po.timestamp = pi.timestamp;
     }
 
     void MapIncremental();

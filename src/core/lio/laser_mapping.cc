@@ -55,6 +55,12 @@ bool LaserMapping::LoadParamsFromYAML(const std::string &yaml_file) {
         b_acc_cov = yaml["fasterlio"]["b_acc_cov"].as<float>();
         preprocess_->Blind() = yaml["fasterlio"]["blind"].as<double>();
         preprocess_->TimeScale() = yaml["fasterlio"]["time_scale"].as<double>();
+        preprocess_->RobosenseScanDuration() = yaml["fasterlio"]["robosense_scan_duration"]
+                                                    ? yaml["fasterlio"]["robosense_scan_duration"].as<double>()
+                                                    : 0.12;
+        preprocess_->RobosenseTimestampTolerance() = yaml["fasterlio"]["robosense_timestamp_tolerance"]
+                                                         ? yaml["fasterlio"]["robosense_timestamp_tolerance"].as<double>()
+                                                         : 0.005;
         lidar_type = yaml["fasterlio"]["lidar_type"].as<int>();
         preprocess_->NumScans() = yaml["fasterlio"]["scan_line"].as<int>();
         preprocess_->PointFilterNum() = yaml["fasterlio"]["point_filter_num"].as<int>();
@@ -455,9 +461,7 @@ void LaserMapping::ProcessPointCloud2(const sensor_msgs::msg::PointCloud2::Share
             scan_count_++;
             double timestamp = ToSec(msg->header.stamp);
             if (timestamp < last_timestamp_lidar_) {
-                LOG(ERROR) << "lidar loop back, clear buffer";
-                // lidar_buffer_.clear();
-                LOG(ERROR) << "lidar loop back, dt: " << timestamp - last_timestamp_lidar_;
+                LOG(WARNING) << "Drop out-of-order fused lidar frame, dt: " << timestamp - last_timestamp_lidar_;
                 return;
             }
             LOG(INFO) << "get cloud at " << std::setprecision(14) << timestamp
@@ -532,13 +536,21 @@ bool LaserMapping::SyncPackages() {
         if (measures_.scan_->points.size() <= 1) {
             LOG(WARNING) << "Too few input point cloud!";
             lidar_end_time_ = measures_.lidar_begin_time_ + lidar_mean_scantime_;
-        } else if (measures_.scan_->points.back().timestamp / double(1000) < 0.5 * lidar_mean_scantime_) {
-            lidar_end_time_ = measures_.lidar_begin_time_ + lidar_mean_scantime_;
         } else {
-            scan_num_++;
-            lidar_end_time_ = measures_.lidar_begin_time_ + measures_.scan_->points.back().timestamp / double(1000);
-            lidar_mean_scantime_ +=
-                (measures_.scan_->points.back().timestamp / double(1000) - lidar_mean_scantime_) / scan_num_;
+            double scan_duration = 0.0;
+            for (const auto &point : measures_.scan_->points) {
+                if (std::isfinite(point.timestamp)) {
+                    scan_duration = std::max(scan_duration, point.timestamp / 1000.0);
+                }
+            }
+
+            if (scan_duration < 0.5 * lidar_mean_scantime_) {
+                lidar_end_time_ = measures_.lidar_begin_time_ + lidar_mean_scantime_;
+            } else {
+                scan_num_++;
+                lidar_end_time_ = measures_.lidar_begin_time_ + scan_duration;
+                lidar_mean_scantime_ += (scan_duration - lidar_mean_scantime_) / scan_num_;
+            }
         }
 
         lo::lidar_time_interval = lidar_mean_scantime_;
@@ -848,6 +860,7 @@ CloudPtr LaserMapping::GetGlobalMap(bool use_lio_pose, bool use_voxel, float res
 
     pcl::VoxelGrid<PointType> voxel;
     voxel.setLeafSize(res, res, res);
+    voxel.setDownsampleAllData(true);
 
     for (auto &kf : all_keyframes_) {
         CloudPtr cloud = kf->GetCloud();

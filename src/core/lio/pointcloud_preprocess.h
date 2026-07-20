@@ -40,6 +40,8 @@ class PointCloudPreprocess {
     int &NumScans() { return num_scans_; }
     int &PointFilterNum() { return point_filter_num_; }
     float &TimeScale() { return time_scale_; }
+    double &RobosenseScanDuration() { return robosense_scan_duration_; }
+    double &RobosenseTimestampTolerance() { return robosense_timestamp_tolerance_; }
     LidarType GetLidarType() const { return lidar_type_; }
     void SetLidarType(LidarType lt) { lidar_type_ = lt; }
     void SetHeightROI(float height_max, float height_min) {
@@ -59,6 +61,8 @@ class PointCloudPreprocess {
     int num_scans_ = 6;
     double blind_ = 0.01;
     float time_scale_ = 1e-3;
+    double robosense_scan_duration_ = 0.12;
+    double robosense_timestamp_tolerance_ = 0.005;
     bool given_offset_time_ = false;
 
     float height_max_ = 1.0;

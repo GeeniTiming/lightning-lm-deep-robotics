@@ -1,5 +1,10 @@
 #include "pointcloud_preprocess.h"
+#include <algorithm>
+#include <cmath>
 #include <execution>
+#include <iomanip>
+#include <unordered_map>
+#include <vector>
 
 #include <glog/logging.h>
 
@@ -234,27 +239,60 @@ void PointCloudPreprocess::RobosenseHandler(const sensor_msgs::msg::PointCloud2:
 
     pcl::PointCloud<robosense_ros::Point> pl_orig;
     pcl::fromROSMsg(*msg, pl_orig);
-    int plsize = pl_orig.points.size();
+    const int plsize = pl_orig.points.size();
+    if (plsize == 0) {
+        return;
+    }
+
     cloud_out_.reserve(plsize);
+    pcl_conversions::toPCL(msg->header, cloud_out_.header);
 
-    double start_time = pl_orig.points[0].timestamp ;
+    const double header_time = msg->header.stamp.sec + msg->header.stamp.nanosec * 1e-9;
+    const double min_time = header_time - robosense_timestamp_tolerance_;
+    const double max_time = header_time + robosense_scan_duration_;
 
-    for (int i = 0; i < plsize; i++) {
-        if (i % point_filter_num_ != 0) {
+    std::vector<std::size_t> valid_indices;
+    valid_indices.reserve(plsize);
+    for (std::size_t i = 0; i < pl_orig.points.size(); ++i) {
+        const auto &pt = pl_orig.points[i];
+        if (!std::isfinite(pt.x) || !std::isfinite(pt.y) || !std::isfinite(pt.z) ||
+            !std::isfinite(pt.timestamp) || pt.timestamp < min_time || pt.timestamp > max_time) {
+            continue;
+        }
+        valid_indices.emplace_back(i);
+    }
+
+    std::stable_sort(valid_indices.begin(), valid_indices.end(), [&](std::size_t lhs, std::size_t rhs) {
+        return pl_orig.points[lhs].timestamp < pl_orig.points[rhs].timestamp;
+    });
+
+    const std::size_t discarded = pl_orig.points.size() - valid_indices.size();
+    if (discarded > pl_orig.points.size() / 10) {
+        LOG(WARNING) << "RoboSense fused scan clipped to one time window: kept " << valid_indices.size()
+                     << "/" << pl_orig.points.size() << " points, header: " << std::setprecision(14)
+                     << header_time;
+    }
+
+    const int filter_num = std::max(1, point_filter_num_);
+    std::unordered_map<std::uint16_t, int> ring_counts;
+    ring_counts.reserve(256);
+
+    for (const std::size_t index : valid_indices) {
+        const auto &src = pl_orig.points[index];
+        int &ring_count = ring_counts[src.ring];
+        if ((ring_count++ % filter_num) != 0) {
             continue;
         }
 
         PointType added_pt;
-        added_pt.x = pl_orig.points[i].x;
-        added_pt.y = pl_orig.points[i].y;
-        added_pt.z = pl_orig.points[i].z;
-        added_pt.intensity = pl_orig.points[i].intensity;
-        added_pt.timestamp = (pl_orig.points[i].timestamp - start_time) * 1e3;  // curvature unit: ms
+        added_pt.x = src.x;
+        added_pt.y = src.y;
+        added_pt.z = src.z;
+        added_pt.intensity = src.intensity;
+        added_pt.timestamp = std::max(0.0, src.timestamp - header_time) * 1e3;  // milliseconds from scan start
 
-        if (i % point_filter_num_ == 0) {
-            if (added_pt.x * added_pt.x + added_pt.y * added_pt.y + added_pt.z * added_pt.z > (blind_ * blind_)) {
-                cloud_out_.points.push_back(added_pt);
-            }
+        if (added_pt.x * added_pt.x + added_pt.y * added_pt.y + added_pt.z * added_pt.z > (blind_ * blind_)) {
+            cloud_out_.points.push_back(added_pt);
         }
     }
     cloud_out_.width = cloud_out_.size();
