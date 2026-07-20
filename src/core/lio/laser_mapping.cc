@@ -1,5 +1,6 @@
 #include <pcl/common/transforms.h>
 #include <yaml-cpp/yaml.h>
+#include <cmath>
 #include <fstream>
 #include <iomanip>
 
@@ -7,6 +8,7 @@
 #include "core/lightning_math.hpp"
 #include "laser_mapping.h"
 #include "ui/pangolin_window.h"
+#include "utils/observability.h"
 #include "wrapper/ros_utils.h"
 
 namespace lightning {
@@ -209,11 +211,19 @@ void LaserMapping::ProcessIMU(const lightning::IMUPtr &imu) {
 bool LaserMapping::Run() {
     if (!SyncPackages()) {
         LOG(WARNING) << "sync package failed";
+        LogObservation("lio.sync_failed",
+                       {{"lio_lidar_buffer_count", static_cast<double>(lidar_buffer_.size()), "frames",
+                         "LaserMapping::SyncPackages", "watch"},
+                        {"lio_imu_buffer_count", static_cast<double>(imu_buffer_.size()), "samples",
+                         "LaserMapping::SyncPackages", "watch"},
+                        {"lio_last_imu_stamp", last_timestamp_imu_, "s", "LaserMapping::SyncPackages", "watch"},
+                        {"lio_lidar_end_stamp", lidar_end_time_, "s", "LaserMapping::SyncPackages", "watch"}});
         return false;
     }
 
     /// IMU process, kf prediction, undistortion
-    p_imu_->Process(measures_, kf_, scan_undistort_);
+    Timer::Evaluate([&]() { p_imu_->Process(measures_, kf_, scan_undistort_); },
+                    "IMU Propagation and Undistort");
 
     if (scan_undistort_->empty() || (scan_undistort_ == nullptr)) {
         LOG(WARNING) << "No point, skip this scan!";
@@ -352,6 +362,15 @@ bool LaserMapping::Run() {
                      << " max: " << max_extrinsic_update_translation_
                      << " extrinsic delta rotation deg: " << extrinsic_update_rotation_deg
                      << " max: " << max_extrinsic_update_rotation_deg_;
+        LogObservation("lio.update_rejected",
+                       {{"lio_effective_points", static_cast<double>(effect_feat_num_), "pts",
+                         "LaserMapping::ObsModel", "watch"},
+                        {"lio_delta_translation_m", lidar_update_translation, "m", "LaserMapping::Run", "watch"},
+                        {"lio_delta_rotation_deg", lidar_update_rotation_deg, "deg", "LaserMapping::Run", "watch"},
+                        {"lio_extrinsic_delta_translation_m", extrinsic_update_translation, "m",
+                         "LaserMapping::Run", "watch"},
+                        {"lio_extrinsic_delta_rotation_deg", extrinsic_update_rotation_deg, "deg",
+                         "LaserMapping::Run", "watch"}});
         kf_.ChangeX(state_before_lidar_update);
         kf_.ChangeP(cov_before_lidar_update);
         state_point_ = state_before_lidar_update;
@@ -366,6 +385,19 @@ bool LaserMapping::Run() {
     Timer::Evaluate([&, this]() { MapIncremental(); }, "    Incremental Mapping");
     LOG(INFO) << "[ mapping ]: In num: " << scan_undistort_->points.size() << " down " << cur_pts
               << " Map grid num: " << ivox_->NumValidGrids() << " effect num : " << effect_feat_num_;
+    LogObservation("lio.mapping",
+                   {{"lio_input_points", static_cast<double>(scan_undistort_->points.size()), "pts",
+                     "LaserMapping::Run"},
+                    {"lio_downsampled_points", static_cast<double>(cur_pts), "pts", "LaserMapping::Run"},
+                    {"lio_effective_points", static_cast<double>(effect_feat_num_), "pts",
+                     "LaserMapping::ObsModel"},
+                    {"lio_map_grid_count", static_cast<double>(ivox_->NumValidGrids()), "cells",
+                     "LaserMapping::MapIncremental"},
+                    {"lio_delta_translation_m", lidar_update_translation, "m", "LaserMapping::Run"},
+                    {"lio_delta_rotation_deg", lidar_update_rotation_deg, "deg", "LaserMapping::Run"},
+                    {"lio_residual_median_sq", last_lidar_residual_median_sq_, "m^2",
+                     "LaserMapping::ObsModel"},
+                    {"lio_residual_max_sq", last_lidar_residual_max_sq_, "m^2", "LaserMapping::ObsModel"}});
     // printf("\rlaser_mapping.cc:251] [ mapping ]: In num: %lu down %d Map grid num: %lu effect num : %d            ",
     //        scan_undistort_->points.size(), cur_pts, ivox_->NumValidGrids(), effect_feat_num_);
     // fflush(stdout);
@@ -421,6 +453,13 @@ void LaserMapping::MakeKF() {
     LOG(INFO) << "LIO: create kf " << kf->GetID() << ", state: " << state_point_.pos_.transpose()
               << ", kf opt pose: " << kf->GetOptPose().translation().transpose()
               << ", lio pose: " << kf->GetLIOPose().translation().transpose();
+    LogObservation("lio.keyframe",
+                   {{"lio_keyframe_id", static_cast<double>(kf->GetID()), "id", "LaserMapping::MakeKF"},
+                    {"lio_keyframe_count", static_cast<double>(all_keyframes_.size() + 1), "frames",
+                     "LaserMapping::MakeKF"},
+                    {"lio_pose_x_m", state_point_.pos_.x(), "m", "LaserMapping::MakeKF"},
+                    {"lio_pose_y_m", state_point_.pos_.y(), "m", "LaserMapping::MakeKF"},
+                    {"lio_pose_z_m", state_point_.pos_.z(), "m", "LaserMapping::MakeKF"}});
 
     // printf("\033[34m\rlaser_mapping.cc:302] LIO: create kf %d, state: [%.3f, %.3f, %.3f], kf opt pose: [%.3f, %.3f, %.3f]\033[0m           ",
     //        kf->GetID(), state_point_.pos_.x(), state_point_.pos_.y(), state_point_.pos_.z(),
@@ -466,12 +505,21 @@ void LaserMapping::ProcessPointCloud2(const sensor_msgs::msg::PointCloud2::Share
             }
             LOG(INFO) << "get cloud at " << std::setprecision(14) << timestamp
                       << ", latest imu: " << last_timestamp_imu_;
+            LogObservation("lio.preprocess",
+                           {{"lio_input_cloud_stamp", timestamp, "s", "LaserMapping::ProcessPointCloud2"},
+                            {"lio_latest_imu_stamp", last_timestamp_imu_, "s",
+                             "LaserMapping::ProcessPointCloud2"},
+                            {"lio_lidar_imu_skew_ms", std::abs(last_timestamp_imu_ - timestamp) * 1000.0, "ms",
+                             "LaserMapping::ProcessPointCloud2"}});
 
             // printf("\rlaser_mapping.cc:324] get cloud at %.14f, latest imu: %.14f           ", timestamp, last_timestamp_imu_);
             // fflush(stdout);
 
             CloudPtr cloud(new PointCloudType());
             preprocess_->Process(msg, cloud);
+            LogObservation("lio.preprocess_result",
+                           {{"lio_preprocessed_points", static_cast<double>(cloud->size()), "pts",
+                             "PointCloudPreprocess::Process"}});
 
             lidar_buffer_.push_back(cloud);
             time_buffer_.push_back(timestamp);
@@ -560,6 +608,11 @@ bool LaserMapping::SyncPackages() {
     }
 
     if (last_timestamp_imu_ < lidar_end_time_) {
+        LogObservation("lio.sync_wait_imu",
+                       {{"lio_sync_wait_imu_ms", (lidar_end_time_ - last_timestamp_imu_) * 1000.0, "ms",
+                         "LaserMapping::SyncPackages", "watch"},
+                        {"lio_lidar_end_stamp", lidar_end_time_, "s", "LaserMapping::SyncPackages", "watch"},
+                        {"lio_last_imu_stamp", last_timestamp_imu_, "s", "LaserMapping::SyncPackages", "watch"}});
         return false;
     }
 
@@ -580,6 +633,17 @@ bool LaserMapping::SyncPackages() {
     lidar_buffer_.pop_front();
     time_buffer_.pop_front();
     lidar_pushed_ = false;
+
+    LogObservation("lio.sync",
+                   {{"lio_lidar_begin_stamp", measures_.lidar_begin_time_, "s", "LaserMapping::SyncPackages"},
+                    {"lio_lidar_end_stamp", measures_.lidar_end_time_, "s", "LaserMapping::SyncPackages"},
+                    {"lio_lidar_scan_span_ms",
+                     (measures_.lidar_end_time_ - measures_.lidar_begin_time_) * 1000.0, "ms",
+                     "LaserMapping::SyncPackages"},
+                    {"lio_sync_imu_count", static_cast<double>(measures_.imu_.size()), "samples",
+                     "LaserMapping::SyncPackages"},
+                    {"lio_lidar_mean_scan_time_ms", lidar_mean_scantime_ * 1000.0, "ms",
+                     "LaserMapping::SyncPackages"}});
 
     // LOG(INFO) << "sync: " << std::setprecision(14) << measures_.lidar_begin_time_ << ", " <<
     // measures_.lidar_end_time_;
@@ -848,6 +912,8 @@ void LaserMapping::ObsModel(NavState &s, ESKF::CustomObservationModel &obs) {
         std::sort(res_sq2.begin(), res_sq2.end());
         obs.lidar_residual_mean_ = res_sq2[res_sq2.size() / 2];
         obs.lidar_residual_max_ = res_sq2[res_sq2.size() - 1];
+        last_lidar_residual_median_sq_ = obs.lidar_residual_mean_;
+        last_lidar_residual_max_sq_ = obs.lidar_residual_max_;
         // LOG(INFO) << "residual mean: " << obs.lidar_residual_mean_ << ", max: " << obs.lidar_residual_max_
         //           << ", 85%: " << res_sq2[res_sq2.size() * 0.85];
     }

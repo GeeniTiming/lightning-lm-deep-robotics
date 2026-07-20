@@ -12,6 +12,8 @@
 
 #include <glog/logging.h>
 
+#include "utils/observability.h"
+
 namespace lightning {
 
 /// 统计时间工具
@@ -54,6 +56,8 @@ class Timer {
             // printf("\rtimer.h:53] func <%s> timer: %.3f ms           ", func_name.c_str(), time_used);
             // fflush(stdout);
         }
+
+        LogObservationTimer(func_name, time_used);
     }
 
     /// 打印记录的所有耗时

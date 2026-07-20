@@ -203,6 +203,8 @@ class LaserMapping {
     double lidar_mean_scantime_ = 0.0;
     int scan_num_ = 0;
     int effect_feat_num_ = 0, frame_num_ = 0;
+    double last_lidar_residual_median_sq_ = 0.0;
+    double last_lidar_residual_max_sq_ = 0.0;
 
     double last_lidar_time_ = 0;
 
