@@ -7,6 +7,7 @@
 #include <deque>
 #include <functional>
 #include <map>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -42,13 +43,16 @@ class Timer {
         auto t2 = std::chrono::steady_clock::now();
         auto time_used = std::chrono::duration_cast<std::chrono::duration<double>>(t2 - t1).count() * 1000;
 
-        if (records_.find(func_name) != records_.end()) {
-            records_[func_name].time_usage_in_ms_.emplace_back(time_used);
-            while (records_[func_name].time_usage_in_ms_.size() > 2000) {
-                records_[func_name].time_usage_in_ms_.pop_front();
+        {
+            std::lock_guard<std::mutex> lock(records_mutex_);
+            if (records_.find(func_name) != records_.end()) {
+                records_[func_name].time_usage_in_ms_.emplace_back(time_used);
+                while (records_[func_name].time_usage_in_ms_.size() > 2000) {
+                    records_[func_name].time_usage_in_ms_.pop_front();
+                }
+            } else {
+                records_.insert({func_name, TimerRecord(func_name, time_used)});
             }
-        } else {
-            records_.insert({func_name, TimerRecord(func_name, time_used)});
         }
 
         if (print) {
@@ -70,9 +74,13 @@ class Timer {
     static double GetMeanTime(const std::string& func_name);
 
     /// 清理记录
-    static void Clear() { records_.clear(); }
+    static void Clear() {
+        std::lock_guard<std::mutex> lock(records_mutex_);
+        records_.clear();
+    }
 
    private:
     static std::map<std::string, TimerRecord> records_;
+    static std::mutex records_mutex_;
 };
 }  // namespace lightning

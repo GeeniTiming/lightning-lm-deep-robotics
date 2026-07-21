@@ -9,6 +9,7 @@
 #include "common/measure_group.h"
 #include "common/point_def.h"
 #include "livox_ros_driver2/msg/custom_msg.hpp"
+#include <sensor_msgs/msg/point_cloud2.hpp>
 
 namespace lightning {
 
@@ -29,7 +30,7 @@ class PointCloudPreprocess {
     ~PointCloudPreprocess() = default;
 
     /// processors
-    void Process(const sensor_msgs::msg::PointCloud2 ::SharedPtr &msg, PointCloudType::Ptr &pcl_out);
+    void Process(const sensor_msgs::msg::PointCloud2::SharedPtr &msg, PointCloudType::Ptr &pcl_out);
 
     void Process(const livox_ros_driver2::msg::CustomMsg::SharedPtr &cloud, PointCloudType::Ptr &pcl_out);
 

@@ -11,6 +11,7 @@ fasterlio:
   time_scale: 1e-3             # 兼容不同数据集的时间单位，仅对Velodyne LiDAR(lidar_type=2)生效
 
   skip_lidar_num: 2 # RK3588实时档：处理一帧、跳一帧，10Hz输入约5Hz建图
+  max_lidar_buffer_size: 5 # RK3588最多缓存约0.5秒的10Hz预处理点云，超限丢弃最老帧
   point_filter_num: 10 # 点云采样参数，增大可降低CPU负载
   max_iteration: 3 # 最大迭代次数
   min_effective_points: 100 # 低于该有效匹配点数时拒绝雷达更新，避免错误关键帧污染地图
@@ -60,6 +61,9 @@ system:
   enable_lidar_loc_skip: false
   log_pose_opt: false # 命令行打印位置和速度
   pub_odom: true
+  imu_qos_reliable: true # M20发布端为RELIABLE，与bag记录的QoS保持一致
+  lidar_qos_depth: 5 # RK3588限制原始PointCloud2缓存；内部LIO队列另行限长
+  lidar_qos_reliable: true # M20发布端为RELIABLE，启用重传以免大点云整帧丢失
   enable_lidar_loc_rviz: true # 是否启用RViz点云发布
   rviz_current_scan_topic: "/current_scan_cloud"
   rviz_global_map_topic: "/global_map_cloud"

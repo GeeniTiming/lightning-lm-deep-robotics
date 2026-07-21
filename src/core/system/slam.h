@@ -10,8 +10,13 @@
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <nav_msgs/msg/odometry.hpp>
-#include <tf2_ros/transform_broadcaster.h>
+// #include <tf2_ros/transform_broadcaster.h>
+#include <tf2_ros/transform_broadcaster.hpp>
+#include <atomic>
+#include <condition_variable>
+#include <mutex>
 #include <string>
+#include <thread>
 
 #include "lightning/msg/nav_state.hpp"
 #include "lightning/srv/save_map.hpp"
@@ -95,6 +100,17 @@ class SlamSystem {
     void SaveMap(const SaveMapService::Request::SharedPtr request, SaveMapService::Response::SharedPtr response);
     void SavePath(const srv::SavePath::Request::SharedPtr request, srv::SavePath::Response::SharedPtr response);
 
+    /// Drain all LiDAR frames whose scan end is covered by buffered IMU.
+    void ProcessReadyLidarFrames();
+
+    /// Publish and dispatch one successfully processed LIO frame.
+    void HandleLidarResult();
+
+    /// Run LIO outside the single-threaded ROS executor in online mode.
+    void ScheduleLidarProcessing();
+    void LidarWorkerLoop();
+    void StopLidarWorker();
+
     Options options_;
     std::atomic_bool running_ = false;
 
@@ -110,6 +126,13 @@ class SlamSystem {
 
     Keyframe::Ptr cur_kf_ = nullptr;
     bool imu_inited_ = false;
+
+    std::thread lidar_worker_;
+    std::mutex lidar_worker_mutex_;
+    std::condition_variable lidar_worker_cv_;
+    bool lidar_work_pending_ = false;
+    bool stop_lidar_worker_ = false;
+    std::mutex lio_processing_mutex_;
 
     /// 实时模式下的ros2 node, subscribers
     rclcpp::Node::SharedPtr node_;

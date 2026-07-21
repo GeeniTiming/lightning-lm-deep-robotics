@@ -26,7 +26,7 @@ std::string getSupportedLidarTypesAsString() {
     return types_list;
 }
 
-void PointCloudPreprocess::Process(const sensor_msgs::msg::PointCloud2 ::SharedPtr &msg, PointCloudType::Ptr &pcl_out) {
+void PointCloudPreprocess::Process(const sensor_msgs::msg::PointCloud2::SharedPtr &msg, PointCloudType::Ptr &pcl_out) {
     switch (lidar_type_) {
         // Only include cases for the LidarType members that have corresponding handlers.
         // AVIA is intentionally excluded from here, so it will fall into the 'default' case.

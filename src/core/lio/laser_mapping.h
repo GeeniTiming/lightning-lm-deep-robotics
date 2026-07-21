@@ -30,6 +30,12 @@ class PangolinWindow;
  */
 class LaserMapping {
    public:
+    enum class RunStatus {
+        NO_READY_SCAN,  // no scan, or the oldest scan is still waiting for IMU
+        FRAME_CONSUMED, // a scan was consumed but intentionally produced no output
+        OUTPUT_READY,   // a scan was consumed and produced a corrected state
+    };
+
     struct Options {
         Options() {}
 
@@ -55,7 +61,13 @@ class LaserMapping {
     /// init without ros
     bool Init(const std::string &config_yaml);
 
+    /// Process one queued LiDAR frame. Run() is kept for existing callers.
+    RunStatus RunOnce();
     bool Run();
+
+    /// Used by event-driven callers to avoid polling RunOnce() on every IMU.
+    bool ShouldProcessLidar();
+    bool HasPendingLidar();
 
     // callbacks of lidar and imu
     /// 处理ROS2的点云
@@ -141,6 +153,9 @@ class LaserMapping {
 
     void LogEstimatedExtrinsic();
 
+    /// Keep a broken sensor time base from growing the internal queue forever.
+    void TrimLidarBuffer();
+
    private:
     Options options_;
 
@@ -194,6 +209,7 @@ class LaserMapping {
     bool enable_skip_lidar_ = true;  // 雷达是否需要跳帧
     int skip_lidar_num_ = 5;         // 每隔多少帧跳一个雷达
     int skip_lidar_cnt_ = 0;
+    size_t max_lidar_buffer_size_ = 20;
 
     /// statistics and flags ///
     int scan_count_ = 0;
