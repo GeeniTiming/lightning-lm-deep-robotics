@@ -39,8 +39,8 @@ fasterlio:
                  0, 1, 0,
                  0, 0, 1 ]
   keep_first_imu_estimation: false
-  robosense_scan_duration: 0.12 # 融合点云只保留消息头之后的单个扫描周期(s)
-  robosense_timestamp_tolerance: 0.005 # 允许点时间略早于消息头(s)
+  robosense_scan_duration: 0.12 # RoboSense单帧时间窗口上限，兼容header为起点或发布时刻(s)
+  robosense_timestamp_tolerance: 0.005 # header起点/发布时刻判断和窗口边界容差(s)
 
 
 g2p5:

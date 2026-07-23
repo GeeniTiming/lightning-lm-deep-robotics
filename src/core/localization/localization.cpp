@@ -112,6 +112,10 @@ bool Localization::Init(const std::string& yaml_path, const std::string& global_
     int lidar_type = yaml.GetValue<int>("fasterlio", "lidar_type");
     preprocess_->NumScans() = yaml.GetValue<int>("fasterlio", "scan_line");
     preprocess_->PointFilterNum() = yaml.GetValue<int>("fasterlio", "point_filter_num");
+    preprocess_->RobosenseScanDuration() =
+        yaml.GetValue<double>("fasterlio", "robosense_scan_duration", 0.12);
+    preprocess_->RobosenseTimestampTolerance() =
+        yaml.GetValue<double>("fasterlio", "robosense_timestamp_tolerance", 0.005);
 
     LOG(INFO) << "lidar_type " << lidar_type;
     if (lidar_type == 1) {
@@ -143,7 +147,8 @@ void Localization::ProcessLidarMsg(const sensor_msgs::msg::PointCloud2::SharedPt
     // 串行模式
     CloudPtr laser_cloud(new PointCloudType);
     preprocess_->Process(cloud, laser_cloud);
-    laser_cloud->header.stamp = cloud->header.stamp.sec * 1e9 + cloud->header.stamp.nanosec;
+    laser_cloud->header.stamp =
+        static_cast<std::uint64_t>(preprocess_->LastScanStartTime() * 1e9);
 
     if (options_.online_mode_) {
         lidar_odom_proc_cloud_.AddMessage(laser_cloud);

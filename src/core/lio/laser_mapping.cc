@@ -549,7 +549,14 @@ void LaserMapping::ProcessPointCloud2(const sensor_msgs::msg::PointCloud2::Share
     Timer::Evaluate(
         [&, this]() {
             scan_count_++;
-            double timestamp = ToSec(msg->header.stamp);
+            const double message_timestamp = ToSec(msg->header.stamp);
+            CloudPtr cloud(new PointCloudType());
+            preprocess_->Process(msg, cloud);
+            double timestamp = preprocess_->LastScanStartTime();
+            if (!std::isfinite(timestamp) || timestamp <= 0.0) {
+                timestamp = message_timestamp;
+            }
+
             if (timestamp < last_timestamp_lidar_) {
                 LOG(WARNING) << "Drop out-of-order fused lidar frame, dt: " << timestamp - last_timestamp_lidar_;
                 return;
@@ -558,15 +565,16 @@ void LaserMapping::ProcessPointCloud2(const sensor_msgs::msg::PointCloud2::Share
                       << ", latest imu: " << last_timestamp_imu_;
             LogObservation("lio.preprocess",
                            {{"lio_input_cloud_stamp", timestamp, "s", "LaserMapping::ProcessPointCloud2"},
+                            {"lio_message_header_stamp", message_timestamp, "s",
+                             "LaserMapping::ProcessPointCloud2"},
+                            {"lio_scan_header_offset_ms", (message_timestamp - timestamp) * 1000.0, "ms",
+                             "PointCloudPreprocess::RobosenseHandler"},
                             {"lio_latest_imu_stamp", last_timestamp_imu_, "s", "LaserMapping::ProcessPointCloud2"},
                             {"lio_lidar_imu_skew_ms", std::abs(last_timestamp_imu_ - timestamp) * 1000.0, "ms",
                              "LaserMapping::ProcessPointCloud2"}});
 
             // printf("\rlaser_mapping.cc:324] get cloud at %.14f, latest imu: %.14f           ", timestamp,
             // last_timestamp_imu_); fflush(stdout);
-
-            CloudPtr cloud(new PointCloudType());
-            preprocess_->Process(msg, cloud);
 
             lidar_buffer_.push_back(cloud);
             time_buffer_.push_back(timestamp);
@@ -639,50 +647,72 @@ bool LaserMapping::SyncPackages() {
         return false;
     }
 
-    /*** push a lidar scan ***/
-    if (!lidar_pushed_) {
-        measures_.scan_ = lidar_buffer_.front();
-        measures_.lidar_begin_time_ = time_buffer_.front();
+    while (true) {
+        if (lidar_buffer_.empty()) {
+            return false;
+        }
 
-        if (measures_.scan_->points.size() <= 1) {
-            LOG(WARNING) << "Too few input point cloud!";
-            lidar_end_time_ = measures_.lidar_begin_time_ + lidar_mean_scantime_;
-        } else {
-            double scan_duration = 0.0;
-            for (const auto &point : measures_.scan_->points) {
-                if (std::isfinite(point.timestamp)) {
-                    scan_duration = std::max(scan_duration, point.timestamp / 1000.0);
+        /*** push a lidar scan ***/
+        if (!lidar_pushed_) {
+            measures_.scan_ = lidar_buffer_.front();
+            measures_.lidar_begin_time_ = time_buffer_.front();
+
+            if (measures_.scan_->points.size() <= 1) {
+                LOG(WARNING) << "Too few input point cloud!";
+                lidar_end_time_ = measures_.lidar_begin_time_ + lidar_mean_scantime_;
+            } else {
+                double scan_duration = 0.0;
+                for (const auto &point : measures_.scan_->points) {
+                    if (std::isfinite(point.timestamp)) {
+                        scan_duration = std::max(scan_duration, point.timestamp / 1000.0);
+                    }
+                }
+
+                if (scan_duration < 0.5 * lidar_mean_scantime_) {
+                    lidar_end_time_ = measures_.lidar_begin_time_ + lidar_mean_scantime_;
+                } else {
+                    scan_num_++;
+                    lidar_end_time_ = measures_.lidar_begin_time_ + scan_duration;
+                    lidar_mean_scantime_ += (scan_duration - lidar_mean_scantime_) / scan_num_;
                 }
             }
 
-            if (scan_duration < 0.5 * lidar_mean_scantime_) {
-                lidar_end_time_ = measures_.lidar_begin_time_ + lidar_mean_scantime_;
-            } else {
-                scan_num_++;
-                lidar_end_time_ = measures_.lidar_begin_time_ + scan_duration;
-                lidar_mean_scantime_ += (scan_duration - lidar_mean_scantime_) / scan_num_;
-            }
+            lo::lidar_time_interval = lidar_mean_scantime_;
+
+            measures_.lidar_end_time_ = lidar_end_time_;
+            lidar_pushed_ = true;
         }
 
-        lo::lidar_time_interval = lidar_mean_scantime_;
+        if (last_timestamp_imu_ < lidar_end_time_) {
+            LogObservation("lio.sync_wait_imu",
+                           {{"lio_sync_wait_imu_ms", (lidar_end_time_ - last_timestamp_imu_) * 1000.0, "ms",
+                             "LaserMapping::SyncPackages", "watch"},
+                            {"lio_lidar_end_stamp", lidar_end_time_, "s", "LaserMapping::SyncPackages", "watch"},
+                            {"lio_last_imu_stamp", last_timestamp_imu_, "s", "LaserMapping::SyncPackages", "watch"}});
+            return false;
+        }
 
-        measures_.lidar_end_time_ = lidar_end_time_;
-        lidar_pushed_ = true;
-    }
+        // A late-starting IMU bag can make the newest IMU timestamp cover an
+        // old scan even though the buffer has no sample inside that scan.
+        // Such a scan cannot be undistorted retrospectively; drop it and
+        // continue looking for the first scan that has actual IMU coverage.
+        if (imu_buffer_.front()->timestamp > lidar_end_time_) {
+            const double dropped_begin = measures_.lidar_begin_time_;
+            const double dropped_end = measures_.lidar_end_time_;
+            lidar_buffer_.pop_front();
+            time_buffer_.pop_front();
+            lidar_pushed_ = false;
+            measures_.scan_.reset();
+            measures_.imu_.clear();
+            LogObservation("lio.drop_scan_no_imu",
+                           {{"lio_lidar_begin_stamp", dropped_begin, "s", "LaserMapping::SyncPackages", "watch"},
+                            {"lio_lidar_end_stamp", dropped_end, "s", "LaserMapping::SyncPackages", "watch"},
+                            {"lio_first_imu_stamp", imu_buffer_.front()->timestamp, "s",
+                             "LaserMapping::SyncPackages", "watch"}});
+            continue;
+        }
 
-    /**
-     * IMU没覆盖扫描结束时间
-    → 立即返回false
-    → ProcessLidar立即返回
-    → 点云继续留在lidar_buffer_
-     */
-    if (last_timestamp_imu_ < lidar_end_time_) {
-        LogObservation("lio.sync_wait_imu",
-                       {{"lio_sync_wait_imu_ms", (lidar_end_time_ - last_timestamp_imu_) * 1000.0, "ms",
-                         "LaserMapping::SyncPackages", "watch"},
-                        {"lio_lidar_end_stamp", lidar_end_time_, "s", "LaserMapping::SyncPackages", "watch"},
-                        {"lio_last_imu_stamp", last_timestamp_imu_, "s", "LaserMapping::SyncPackages", "watch"}});
-        return false;
+        break;
     }
 
     /*** push imu_ data, and pop from imu_ buffer ***/

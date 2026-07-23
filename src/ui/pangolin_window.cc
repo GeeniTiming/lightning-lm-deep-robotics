@@ -6,6 +6,7 @@ PangolinWindow::PangolinWindow() { impl_ = std::make_shared<PangolinWindowImpl>(
 PangolinWindow::~PangolinWindow() { Quit(); }
 
 bool PangolinWindow::Init() {
+    impl_->exit_flag_.store(false);
     impl_->cloud_global_need_update_.store(false);
     impl_->kf_result_need_update_.store(false);
     impl_->lidarloc_need_update_.store(false);

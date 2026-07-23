@@ -362,7 +362,6 @@ void PangolinWindowImpl::Render() {
     // display layout
     CreateDisplayLayout();
 
-    exit_flag_.store(false);
     while (!pangolin::ShouldQuit() && !exit_flag_) {
         // Clear entire screen
         glClearColor(20.0 / 255.0, 20.0 / 255.0, 20.0 / 255.0, 1.0);
@@ -412,7 +411,10 @@ void PangolinWindowImpl::Render() {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
 
-    // unset the current context from the main thread
+    // Plotter and other Pangolin GL objects must be destroyed while this
+    // render thread still owns the context.
+    ReleaseBuffer();
+
     pangolin::GetBoundWindow()->RemoveCurrent();
     pangolin::DestroyWindow(GetWindowName());
 }
@@ -428,6 +430,15 @@ void PangolinWindowImpl::AllocateBuffer() {
     gltext_label_global_ = font.Text(global_text);
 }
 
-void PangolinWindowImpl::ReleaseBuffer() {}
+void PangolinWindowImpl::ReleaseBuffer() {
+    plotter_err_eval_.reset();
+    plotter_err_.reset();
+    plotter_confidence_.reset();
+    plotter_vel_baselink_.reset();
+    plotter_vel_.reset();
+
+    traj_newest_state_.reset();
+    traj_scans_.reset();
+}
 
 }  // namespace lightning::ui
