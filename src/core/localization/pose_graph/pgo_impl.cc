@@ -747,13 +747,6 @@ void PGOImpl::PGOFrameToResult(const PGOFramePtr& frame, LocalizationResult& res
     result.lidar_loc_inlier_ = frame->lidar_loc_inlier_;
     result.lidar_loc_delta_t_ = frame->lidar_loc_delta_t_;
     result.confidence_ = frame->confidence_;
-    if (frame->lidar_loc_valid_) {
-        result.status_ = LocalizationStatus::GOOD;
-    } else if (frame->dr_valid_ || frame->lidar_odom_valid_) {
-        result.status_ = LocalizationStatus::FOLLOWING_DR;
-    } else {
-        result.status_ = LocalizationStatus::FAIL;
-    }
     Vec3d loc_error = frame->lidar_loc_pose_.translation() - result.pose_.translation();
     Vec3d loc_err_body = result.pose_.so3().inverse() * loc_error;
     result.lidar_loc_error_vert_ = fabs(loc_err_body[0]);

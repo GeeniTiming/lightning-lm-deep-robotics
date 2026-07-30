@@ -307,6 +307,10 @@ inline void ImuProcess::UndistortPcl(const MeasureGroup &meas, ESKF &kf_state, C
 }
 
 inline void ImuProcess::Process(const MeasureGroup &meas, ESKF &kf_state, CloudPtr &scan) {
+    // Every call owns a fresh output. Initialization and missing-IMU early
+    // returns must not expose the point cloud produced by a previous frame.
+    scan.reset(new PointCloudType());
+
     if (meas.imu_.empty()) {
         return;
     }

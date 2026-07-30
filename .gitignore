@@ -16,4 +16,3 @@ bin
 **cmake-build-debug**
 **cmake-build-release**
 thirdparty/Pangolin-0.9.3/**
-__pycache__

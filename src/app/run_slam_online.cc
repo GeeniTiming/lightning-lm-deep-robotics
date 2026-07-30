@@ -13,20 +13,8 @@
 
 DEFINE_string(config, "./config/default.yaml", "配置文件");
 
-// Global pointer to SlamSystem instance
-lightning::SlamSystem* slam_instance = nullptr;
-
 // Signal handler for SIGINT
-void SignalHandler(int signum) {
-    if (slam_instance) {
-        LOG(INFO) << "SIGINT received, saving map and path...";
-        slam_instance->SaveMap();
-        slam_instance->SavePath();
-    }
-    rclcpp::shutdown();
-    LOG(INFO) << "Shutdown complete.";
-    std::exit(signum);
-}
+void SignalHandler(int) { rclcpp::shutdown(); }
 
 /// 运行一个LIO前端，带可视化
 int main(int argc, char** argv) {
@@ -44,7 +32,6 @@ int main(int argc, char** argv) {
     options.online_mode_ = true;
 
     SlamSystem slam(options);
-    slam_instance = &slam;  // Assign global pointer
 
     if (!slam.Init(FLAGS_config)) {
         LOG(ERROR) << "failed to init slam";
@@ -57,6 +44,9 @@ int main(int argc, char** argv) {
     slam.StartSLAM("");
     slam.Spin();
 
+    LOG(INFO) << "Saving map and path before shutdown...";
+    slam.SaveMap();
+    slam.SavePath();
     Timer::PrintAll();
 
     rclcpp::shutdown();

@@ -10,13 +10,17 @@
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <nav_msgs/msg/odometry.hpp>
-// #include <tf2_ros/transform_broadcaster.h>
-#include <tf2_ros/transform_broadcaster.hpp>
+#include <tf2_ros/transform_broadcaster.h>
 #include <atomic>
 #include <condition_variable>
+#include <cstddef>
+#include <cstdint>
+#include <deque>
+#include <map>
 #include <mutex>
 #include <string>
 #include <thread>
+#include <variant>
 
 #include "lightning/msg/nav_state.hpp"
 #include "lightning/srv/save_map.hpp"
@@ -59,7 +63,10 @@ class SlamSystem {
         bool pub_tf_ = false;               // 是否需要发布TF
         bool enable_lidar_rviz_ = false; // 是否需要RViz可视化点云
         bool enable_path_rviz_ = false;      // 是否发布Path
-        int rviz_global_map_kf_interval_ = 3; // 每隔多少关键帧发布一次全局点云，<=0表示不发布
+
+        bool async_lio_ = true;  // 在线模式下异步处理传感器事件
+        std::size_t async_lio_max_pending_lidar_ = 192;
+        std::size_t async_lio_max_pending_imu_ = 20000;
 
         bool step_on_kf_ = true;  // 是否在关键帧处暂停p
         bool log_pose_opt_ = false; // 是否打印位姿和速度
@@ -100,16 +107,26 @@ class SlamSystem {
     void SaveMap(const SaveMapService::Request::SharedPtr request, SaveMapService::Response::SharedPtr response);
     void SavePath(const srv::SavePath::Request::SharedPtr request, srv::SavePath::Response::SharedPtr response);
 
-    /// Drain all LiDAR frames whose scan end is covered by buffered IMU.
-    void ProcessReadyLidarFrames();
+    using SensorEventPayload =
+        std::variant<lightning::IMUPtr, sensor_msgs::msg::PointCloud2::SharedPtr,
+                     livox_ros_driver2::msg::CustomMsg::SharedPtr>;
 
-    /// Publish and dispatch one successfully processed LIO frame.
-    void HandleLidarResult();
+    struct SensorEvent {
+        std::uint64_t sequence = 0;
+        SensorEventPayload payload;
+    };
 
-    /// Run LIO outside the single-threaded ROS executor in online mode.
-    void ScheduleLidarProcessing();
-    void LidarWorkerLoop();
-    void StopLidarWorker();
+    /// Queue one online sensor event without running LIO in the ROS callback.
+    void EnqueueSensorEvent(SensorEventPayload payload);
+
+    /// Apply one sensor input; callers drain ready LiDAR after the input batch.
+    void ProcessSensorEventLocked(const SensorEventPayload& payload);
+    void ProcessReadyLidarFramesLocked();
+    void HandleLidarResultLocked();
+
+    void SensorWorkerLoop();
+    void StopSensorWorker();
+    void WaitForSensorEvents();
 
     Options options_;
     std::atomic_bool running_ = false;
@@ -127,11 +144,21 @@ class SlamSystem {
     Keyframe::Ptr cur_kf_ = nullptr;
     bool imu_inited_ = false;
 
-    std::thread lidar_worker_;
-    std::mutex lidar_worker_mutex_;
-    std::condition_variable lidar_worker_cv_;
-    bool lidar_work_pending_ = false;
-    bool stop_lidar_worker_ = false;
+    std::thread sensor_worker_;
+    std::mutex sensor_event_mutex_;
+    std::condition_variable sensor_event_cv_;
+    std::condition_variable sensor_event_drained_cv_;
+    std::deque<SensorEvent> sensor_events_;
+    std::uint64_t next_sensor_sequence_ = 0;
+    std::uint64_t completed_sensor_sequence_ = 0;
+    std::size_t pending_lidar_events_ = 0;
+    std::size_t pending_imu_events_ = 0;
+    std::size_t dropped_lidar_events_ = 0;
+    std::size_t dropped_imu_events_ = 0;
+    bool accepting_sensor_events_ = false;
+    bool stop_sensor_worker_ = false;
+
+    /// Serializes LIO, result publication and save operations.
     std::mutex lio_processing_mutex_;
 
     /// 实时模式下的ros2 node, subscribers

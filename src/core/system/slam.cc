@@ -12,10 +12,12 @@
 #include "wrapper/ros_utils.h"
 
 #include <yaml-cpp/yaml.h>
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <opencv2/opencv.hpp>
+#include <utility>
 
 namespace lightning {
 
@@ -42,9 +44,16 @@ bool SlamSystem::Init(const std::string& yaml_path) {
     options_.log_pose_opt_ = yaml["system"]["log_pose_opt"] ? yaml["system"]["log_pose_opt"].as<bool>() : false;
     options_.enable_lidar_rviz_ = yaml["system"]["enable_lidar_loc_rviz"] ? yaml["system"]["enable_lidar_loc_rviz"].as<bool>() : false;
     options_.enable_path_rviz_ = yaml["system"]["enable_path_rviz"] ? yaml["system"]["enable_path_rviz"].as<bool>() : false;
-    options_.rviz_global_map_kf_interval_ =
-        yaml["system"]["rviz_global_map_kf_interval"] ? yaml["system"]["rviz_global_map_kf_interval"].as<int>() : 3;
     options_.use_imu_init_ = yaml["system"]["use_imu_orient"] ? yaml["system"]["use_imu_orient"].as<bool>() : false;
+    options_.async_lio_ = yaml["system"]["async_lio"] ? yaml["system"]["async_lio"].as<bool>() : true;
+    const int max_pending_lidar = yaml["system"]["async_lio_max_pending_lidar"]
+                                      ? yaml["system"]["async_lio_max_pending_lidar"].as<int>()
+                                      : 192;
+    const int max_pending_imu = yaml["system"]["async_lio_max_pending_imu"]
+                                    ? yaml["system"]["async_lio_max_pending_imu"].as<int>()
+                                    : 20000;
+    options_.async_lio_max_pending_lidar_ = static_cast<std::size_t>(std::max(1, max_pending_lidar));
+    options_.async_lio_max_pending_imu_ = static_cast<std::size_t>(std::max(1, max_pending_imu));
     if(options_.enable_lidar_rviz_ && !options_.enable_path_rviz_) {
         options_.enable_path_rviz_ = true; // 发布路径时会包含位姿信息，方便调试
     }
@@ -60,7 +69,9 @@ bool SlamSystem::Init(const std::string& yaml_path) {
               << "\n  pub_tf: " << options_.pub_tf_
               << "\n  enable_lidar_rviz: " << options_.enable_lidar_rviz_
               << "\n  enable_path_rviz: " << options_.enable_path_rviz_
-              << "\n  rviz_global_map_kf_interval: " << options_.rviz_global_map_kf_interval_
+              << "\n  async_lio: " << options_.async_lio_
+              << "\n  async_lio_max_pending_lidar: " << options_.async_lio_max_pending_lidar_
+              << "\n  async_lio_max_pending_imu: " << options_.async_lio_max_pending_imu_
               << "\n  step_on_kf: " << options_.step_on_kf_
               << "\n  log_pose_opt: " << options_.log_pose_opt_
               << "\n  use_imu_init: " << options_.use_imu_init_;
@@ -135,28 +146,30 @@ bool SlamSystem::Init(const std::string& yaml_path) {
         cloud_topic_ = yaml["common"]["lidar_topic"].as<std::string>();
         livox_topic_ = yaml["common"]["livox_lidar_topic"].as<std::string>();
 
-        rclcpp::QoS imu_qos(rclcpp::KeepLast(1000));
+        const int imu_qos_depth =
+            std::max(1, yaml["system"]["imu_qos_depth"] ? yaml["system"]["imu_qos_depth"].as<int>() : 2000);
+        const int lidar_qos_depth =
+            std::max(1, yaml["system"]["lidar_qos_depth"] ? yaml["system"]["lidar_qos_depth"].as<int>() : 20);
         const bool imu_qos_reliable =
-            yaml["system"]["imu_qos_reliable"] && yaml["system"]["imu_qos_reliable"].as<bool>();
+            yaml["system"]["imu_qos_reliable"] ? yaml["system"]["imu_qos_reliable"].as<bool>() : true;
+        const bool lidar_qos_reliable =
+            yaml["system"]["lidar_qos_reliable"] ? yaml["system"]["lidar_qos_reliable"].as<bool>() : true;
+
+        rclcpp::QoS imu_qos{rclcpp::KeepLast(static_cast<std::size_t>(imu_qos_depth))};
+        rclcpp::QoS lidar_qos{rclcpp::KeepLast(static_cast<std::size_t>(lidar_qos_depth))};
         if (imu_qos_reliable) {
             imu_qos.reliable();
         } else {
             imu_qos.best_effort();
         }
-        int lidar_qos_depth =
-            yaml["system"]["lidar_qos_depth"] ? yaml["system"]["lidar_qos_depth"].as<int>() : 10;
-        lidar_qos_depth = std::max(1, lidar_qos_depth);
-        const bool lidar_qos_reliable =
-            yaml["system"]["lidar_qos_reliable"] && yaml["system"]["lidar_qos_reliable"].as<bool>();
-        rclcpp::QoS lidar_qos{rclcpp::KeepLast(static_cast<size_t>(lidar_qos_depth))};
         if (lidar_qos_reliable) {
             lidar_qos.reliable();
         } else {
             lidar_qos.best_effort();
         }
         LOG(INFO) << "ROS sensor QoS: IMU=" << (imu_qos_reliable ? "reliable" : "best_effort")
-                  << ", LiDAR=" << (lidar_qos_reliable ? "reliable" : "best_effort")
-                  << ", LiDAR depth=" << lidar_qos_depth;
+                  << " depth=" << imu_qos_depth << ", LiDAR="
+                  << (lidar_qos_reliable ? "reliable" : "best_effort") << " depth=" << lidar_qos_depth;
 
         imu_sub_ = node_->create_subscription<sensor_msgs::msg::Imu>(
             imu_topic_, imu_qos, [this](sensor_msgs::msg::Imu::SharedPtr msg) {
@@ -173,14 +186,12 @@ bool SlamSystem::Init(const std::string& yaml_path) {
             });
 
         cloud_sub_ = node_->create_subscription<sensor_msgs::msg::PointCloud2>(
-            cloud_topic_, lidar_qos, [this](sensor_msgs::msg::PointCloud2::SharedPtr cloud) {
-                Timer::Evaluate([&]() { ProcessLidar(cloud); }, "Proc Lidar", true);
-            });
+            cloud_topic_, lidar_qos,
+            [this](sensor_msgs::msg::PointCloud2::SharedPtr cloud) { ProcessLidar(std::move(cloud)); });
 
         livox_sub_ = node_->create_subscription<livox_ros_driver2::msg::CustomMsg>(
-            livox_topic_, lidar_qos, [this](livox_ros_driver2::msg::CustomMsg ::SharedPtr cloud) {
-                Timer::Evaluate([&]() { ProcessLidar(cloud); }, "Proc Lidar", true);
-            });
+            livox_topic_, lidar_qos,
+            [this](livox_ros_driver2::msg::CustomMsg::SharedPtr cloud) { ProcessLidar(std::move(cloud)); });
 
         if (options_.enable_lidar_rviz_) {
             std::string scan_topic = yaml["system"]["rviz_current_scan_topic"] ? yaml["system"]["rviz_current_scan_topic"].as<std::string>() : "lightning/current_scan";
@@ -217,7 +228,13 @@ bool SlamSystem::Init(const std::string& yaml_path) {
 }
 
 SlamSystem::~SlamSystem() {
-    StopLidarWorker();
+    StopSensorWorker();
+
+    // Loop closing owns a callback into G2P5, so its worker must stop while
+    // the grid mapper is still alive.
+    lc_.reset();
+    g2p5_.reset();
+
     if (ui_) {
         ui_->Quit();
     }
@@ -227,11 +244,16 @@ void SlamSystem::StartSLAM(std::string map_name) {
     if (!map_name.empty()) {
         map_name_ = map_name;
     }
-    running_ = true;
-    if (options_.online_mode_ && !lidar_worker_.joinable()) {
-        stop_lidar_worker_ = false;
-        lidar_worker_ = std::thread([this]() { LidarWorkerLoop(); });
+
+    if (options_.online_mode_ && options_.async_lio_ && !sensor_worker_.joinable()) {
+        {
+            std::lock_guard<std::mutex> lock(sensor_event_mutex_);
+            stop_sensor_worker_ = false;
+            accepting_sensor_events_ = true;
+        }
+        sensor_worker_ = std::thread([this]() { SensorWorkerLoop(); });
     }
+    running_.store(true, std::memory_order_release);
 }
 
 void SlamSystem::SaveMap(const SaveMapService::Request::SharedPtr request,
@@ -244,7 +266,17 @@ void SlamSystem::SaveMap(const SaveMapService::Request::SharedPtr request,
 }
 
 void SlamSystem::SaveMap(const std::string& path) {
-    std::lock_guard<std::mutex> lock(lio_processing_mutex_);
+    WaitForSensorEvents();
+    std::lock_guard<std::mutex> lio_lock(lio_processing_mutex_);
+    lio_->FlushPendingPointClouds();
+    ProcessReadyLidarFramesLocked();
+
+    const auto keyframes = lio_->GetAllKeyframes();
+    if (keyframes.empty()) {
+        LOG(WARNING) << "skip map save: LIO has not produced a keyframe";
+        return;
+    }
+
     std::string save_path = path;
     if (save_path.empty()) {
         save_path = "./data/" + map_name_ + "/";
@@ -267,7 +299,7 @@ void SlamSystem::SaveMap(const std::string& path) {
     tm_options.map_path_ = save_path;
 
     TiledMap tm(tm_options);
-    SE3 start_pose = lio_->GetAllKeyframes().front()->GetOptPose();
+    SE3 start_pose = keyframes.front()->GetOptPose();
     tm.ConvertFromFullPCD(global_map, start_pose, save_path);
 
     pcl::io::savePCDFileBinaryCompressed(save_path + "/global.pcd", *global_map);
@@ -275,57 +307,62 @@ void SlamSystem::SaveMap(const std::string& path) {
     // pcl::io::savePCDFileBinaryCompressed(save_path + "/global_raw.pcd", *global_map_raw);
 
     if (options_.with_gridmap_) {
-        /// 存为ROS兼容的模式
-        auto map = g2p5_->GetNewestMap()->ToROS();
-        const int width = map.info.width;
-        const int height = map.info.height;
+        auto grid_map = g2p5_ ? g2p5_->GetNewestMap() : nullptr;
+        if (!grid_map) {
+            LOG(WARNING) << "skip 2D grid map save: G2P5 has not produced a map";
+        } else {
+            /// 存为ROS兼容的模式
+            auto map = grid_map->ToROS();
+            const int width = map.info.width;
+            const int height = map.info.height;
 
-        cv::Mat nav_image(height, width, CV_8UC1);
-        for (int y = 0; y < height; ++y) {
-            const int rowStartIndex = y * width;
-            for (int x = 0; x < width; ++x) {
-                const int index = rowStartIndex + x;
-                int8_t data = map.data[index];
-                if (data == 0) {                                   // Free
-                    nav_image.at<uchar>(height - 1 - y, x) = 255;  // White
-                } else if (data == 100) {                          // Occupied
-                    nav_image.at<uchar>(height - 1 - y, x) = 0;    // Black
-                } else {                                           // Unknown
-                    nav_image.at<uchar>(height - 1 - y, x) = 128;  // Gray
+            cv::Mat nav_image(height, width, CV_8UC1);
+            for (int y = 0; y < height; ++y) {
+                const int rowStartIndex = y * width;
+                for (int x = 0; x < width; ++x) {
+                    const int index = rowStartIndex + x;
+                    int8_t data = map.data[index];
+                    if (data == 0) {                                   // Free
+                        nav_image.at<uchar>(height - 1 - y, x) = 255;  // White
+                    } else if (data == 100) {                          // Occupied
+                        nav_image.at<uchar>(height - 1 - y, x) = 0;    // Black
+                    } else {                                           // Unknown
+                        nav_image.at<uchar>(height - 1 - y, x) = 128;  // Gray
+                    }
                 }
             }
-        }
 
-        cv::imwrite(save_path + "/map.pgm", nav_image);
+            cv::imwrite(save_path + "/map.pgm", nav_image);
 
-        /// yaml
-        std::ofstream yamlFile(save_path + "/map.yaml");
-        if (!yamlFile.is_open()) {
-            LOG(ERROR) << "failed to write map.yaml";
-            return;  // 文件打开失败
-        }
+            /// yaml
+            std::ofstream yamlFile(save_path + "/map.yaml");
+            if (!yamlFile.is_open()) {
+                LOG(ERROR) << "failed to write map.yaml";
+                return;  // 文件打开失败
+            }
 
-        try {
-            YAML::Emitter emitter;
-            emitter << YAML::BeginMap;
-            emitter << YAML::Key << "image" << YAML::Value << "map.pgm";
-            emitter << YAML::Key << "mode" << YAML::Value << "trinary";
-            emitter << YAML::Key << "width" << YAML::Value << map.info.width;
-            emitter << YAML::Key << "height" << YAML::Value << map.info.height;
-            emitter << YAML::Key << "resolution" << YAML::Value << map.info.resolution;
-            std::vector<double> orig{map.info.origin.position.x, map.info.origin.position.y, 0};
-            emitter << YAML::Key << "origin" << YAML::Value << orig;
-            emitter << YAML::Key << "negate" << YAML::Value << 0;
-            emitter << YAML::Key << "occupied_thresh" << YAML::Value << 0.65;
-            emitter << YAML::Key << "free_thresh" << YAML::Value << 0.25;
+            try {
+                YAML::Emitter emitter;
+                emitter << YAML::BeginMap;
+                emitter << YAML::Key << "image" << YAML::Value << "map.pgm";
+                emitter << YAML::Key << "mode" << YAML::Value << "trinary";
+                emitter << YAML::Key << "width" << YAML::Value << map.info.width;
+                emitter << YAML::Key << "height" << YAML::Value << map.info.height;
+                emitter << YAML::Key << "resolution" << YAML::Value << float(0.05);
+                std::vector<double> orig{map.info.origin.position.x, map.info.origin.position.y, 0};
+                emitter << YAML::Key << "origin" << YAML::Value << orig;
+                emitter << YAML::Key << "negate" << YAML::Value << 0;
+                emitter << YAML::Key << "occupied_thresh" << YAML::Value << 0.65;
+                emitter << YAML::Key << "free_thresh" << YAML::Value << 0.25;
 
-            emitter << YAML::EndMap;
+                emitter << YAML::EndMap;
 
-            yamlFile << emitter.c_str();
-            yamlFile.close();
-        } catch (...) {
-            yamlFile.close();
-            return;
+                yamlFile << emitter.c_str();
+                yamlFile.close();
+            } catch (...) {
+                yamlFile.close();
+                return;
+            }
         }
     }
 
@@ -338,16 +375,23 @@ void SlamSystem::SaveMap(const std::string& path) {
 void SlamSystem::SavePath(const srv::SavePath::Request::SharedPtr request, srv::SavePath::Response::SharedPtr response) {
     std::string save_path = request->file_path;
     bool success = SavePath(save_path);
+    std::size_t path_size = 0;
+    {
+        std::lock_guard<std::mutex> lio_lock(lio_processing_mutex_);
+        path_size = path_.poses.size();
+    }
     response->success = success;
     if (success) {
-        response->message = "Path saved successfully. Total poses: " + std::to_string(path_.poses.size());
+        response->message = "Path saved successfully. Total poses: " + std::to_string(path_size);
     } else {
         response->message = "Failed to save path.";
     }
 }
 
 bool SlamSystem::SavePath(const std::string& path) {
-    std::lock_guard<std::mutex> lock(lio_processing_mutex_);
+    WaitForSensorEvents();
+    std::lock_guard<std::mutex> lio_lock(lio_processing_mutex_);
+
     std::string save_path = path;
     if (save_path.empty()) {
         char time_str[64];
@@ -377,108 +421,231 @@ bool SlamSystem::SavePath(const std::string& path) {
 
 
 void SlamSystem::ProcessIMU(const lightning::IMUPtr& imu) {
-    if (running_ == false) {
+    if (!running_.load(std::memory_order_acquire) || !imu) {
         return;
     }
 
-    if (options_.use_imu_init_ && !imu_inited_) {
-        LOG(INFO) << "Auto-initializing slam pose from IMU orientation (ENU): "
-                  << imu->orientation.coeffs().transpose();
-        lio_->SetInitPose(SE3(imu->orientation, Vec3d::Zero()));
-        imu_inited_ = true;
+    if (options_.online_mode_ && options_.async_lio_) {
+        EnqueueSensorEvent(imu);
+        return;
     }
 
-    lio_->ProcessIMU(imu);
-    if (lio_->ShouldProcessLidar()) {
-        ScheduleLidarProcessing();
-    }
+    std::lock_guard<std::mutex> lock(lio_processing_mutex_);
+    ProcessSensorEventLocked(imu);
+    ProcessReadyLidarFramesLocked();
 }
 
 void SlamSystem::ProcessLidar(const sensor_msgs::msg::PointCloud2::SharedPtr& cloud) {
-    if (running_ == false) {
+    if (!running_.load(std::memory_order_acquire) || !cloud) {
         return;
     }
 
-    lio_->ProcessPointCloud2(cloud);
-    ScheduleLidarProcessing();
+    if (options_.online_mode_ && options_.async_lio_) {
+        EnqueueSensorEvent(cloud);
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(lio_processing_mutex_);
+    ProcessSensorEventLocked(cloud);
+    ProcessReadyLidarFramesLocked();
 }
 
-void SlamSystem::ProcessReadyLidarFrames() {
+void SlamSystem::ProcessLidar(const livox_ros_driver2::msg::CustomMsg::SharedPtr& cloud) {
+    if (!running_.load(std::memory_order_acquire) || !cloud) {
+        return;
+    }
+
+    if (options_.online_mode_ && options_.async_lio_) {
+        EnqueueSensorEvent(cloud);
+        return;
+    }
+
     std::lock_guard<std::mutex> lock(lio_processing_mutex_);
+    ProcessSensorEventLocked(cloud);
+    ProcessReadyLidarFramesLocked();
+}
+
+void SlamSystem::EnqueueSensorEvent(SensorEventPayload payload) {
+    const bool is_imu = std::holds_alternative<lightning::IMUPtr>(payload);
+
+    {
+        std::lock_guard<std::mutex> lock(sensor_event_mutex_);
+        if (!accepting_sensor_events_) {
+            return;
+        }
+
+        if (is_imu && pending_imu_events_ >= options_.async_lio_max_pending_imu_) {
+            const auto it = std::find_if(sensor_events_.begin(), sensor_events_.end(), [](const SensorEvent& event) {
+                return std::holds_alternative<lightning::IMUPtr>(event.payload);
+            });
+            if (it != sensor_events_.end()) {
+                sensor_events_.erase(it);
+                --pending_imu_events_;
+                ++dropped_imu_events_;
+                if (dropped_imu_events_ == 1 || dropped_imu_events_ % 1000 == 0) {
+                    LOG(WARNING) << "async LIO raw IMU queue overflow, dropped oldest IMU; total dropped: "
+                                 << dropped_imu_events_;
+                }
+            }
+        } else if (!is_imu && pending_lidar_events_ >= options_.async_lio_max_pending_lidar_) {
+            const auto it = std::find_if(sensor_events_.begin(), sensor_events_.end(), [](const SensorEvent& event) {
+                return !std::holds_alternative<lightning::IMUPtr>(event.payload);
+            });
+            if (it != sensor_events_.end()) {
+                sensor_events_.erase(it);
+                --pending_lidar_events_;
+                ++dropped_lidar_events_;
+                if (dropped_lidar_events_ == 1 || dropped_lidar_events_ % 100 == 0) {
+                    LOG(WARNING) << "async LIO raw LiDAR queue overflow, dropped oldest scan; total dropped: "
+                                 << dropped_lidar_events_;
+                }
+            }
+        }
+
+        sensor_events_.push_back(SensorEvent{++next_sensor_sequence_, std::move(payload)});
+        if (is_imu) {
+            ++pending_imu_events_;
+        } else {
+            ++pending_lidar_events_;
+        }
+    }
+    sensor_event_cv_.notify_one();
+}
+
+void SlamSystem::ProcessSensorEventLocked(const SensorEventPayload& payload) {
+    if (const auto* imu = std::get_if<lightning::IMUPtr>(&payload)) {
+        if (!*imu) {
+            return;
+        }
+        if (options_.use_imu_init_ && !imu_inited_) {
+            LOG(INFO) << "Auto-initializing slam pose from IMU orientation (ENU): "
+                      << (*imu)->orientation.coeffs().transpose();
+            lio_->SetInitPose(SE3((*imu)->orientation, Vec3d::Zero()));
+            imu_inited_ = true;
+        }
+        lio_->ProcessIMU(*imu);
+        return;
+    }
+
+    if (const auto* cloud = std::get_if<sensor_msgs::msg::PointCloud2::SharedPtr>(&payload)) {
+        if (*cloud) {
+            lio_->ProcessPointCloud2(*cloud);
+        }
+        return;
+    }
+
+    const auto* cloud = std::get_if<livox_ros_driver2::msg::CustomMsg::SharedPtr>(&payload);
+    if (cloud != nullptr && *cloud) {
+        lio_->ProcessPointCloud2(*cloud);
+    }
+}
+
+void SlamSystem::ProcessReadyLidarFramesLocked() {
     while (lio_->HasPendingLidar()) {
         const auto status = lio_->RunOnce();
         if (status == LaserMapping::RunStatus::NO_READY_SCAN) {
             break;
         }
         if (status == LaserMapping::RunStatus::OUTPUT_READY) {
-            HandleLidarResult();
+            HandleLidarResultLocked();
         }
     }
 }
 
-void SlamSystem::ScheduleLidarProcessing() {
-    if (!options_.online_mode_) {
-        ProcessReadyLidarFrames();
+void SlamSystem::SensorWorkerLoop() {
+    constexpr std::size_t kMaxBatchSize = 256;
+    while (true) {
+        std::deque<SensorEvent> batch;
+        {
+            std::unique_lock<std::mutex> lock(sensor_event_mutex_);
+            sensor_event_cv_.wait(lock, [this]() { return stop_sensor_worker_ || !sensor_events_.empty(); });
+            if (sensor_events_.empty() && stop_sensor_worker_) {
+                break;
+            }
+
+            while (!sensor_events_.empty() && batch.size() < kMaxBatchSize) {
+                SensorEvent event = std::move(sensor_events_.front());
+                sensor_events_.pop_front();
+                if (std::holds_alternative<lightning::IMUPtr>(event.payload)) {
+                    --pending_imu_events_;
+                } else {
+                    --pending_lidar_events_;
+                }
+                batch.emplace_back(std::move(event));
+            }
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(lio_processing_mutex_);
+            for (const auto& event : batch) {
+                ProcessSensorEventLocked(event.payload);
+                // Retry after every IMU as well as every LiDAR. This preserves
+                // event order without transferring a large raw backlog into
+                // LaserMapping's much smaller synchronization buffer.
+                ProcessReadyLidarFramesLocked();
+            }
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(sensor_event_mutex_);
+            completed_sensor_sequence_ = std::max(completed_sensor_sequence_, batch.back().sequence);
+        }
+        sensor_event_drained_cv_.notify_all();
+    }
+
+    sensor_event_drained_cv_.notify_all();
+}
+
+void SlamSystem::WaitForSensorEvents() {
+    if (!options_.online_mode_ || !options_.async_lio_ || !sensor_worker_.joinable()) {
         return;
     }
 
+    std::unique_lock<std::mutex> lock(sensor_event_mutex_);
+    const std::uint64_t target_sequence = next_sensor_sequence_;
+    sensor_event_drained_cv_.wait(lock,
+                                  [this, target_sequence]() { return completed_sensor_sequence_ >= target_sequence; });
+}
+
+void SlamSystem::StopSensorWorker() {
+    running_.store(false, std::memory_order_release);
+
     {
-        std::lock_guard<std::mutex> lock(lidar_worker_mutex_);
-        lidar_work_pending_ = true;
+        std::lock_guard<std::mutex> lock(sensor_event_mutex_);
+        accepting_sensor_events_ = false;
+        stop_sensor_worker_ = true;
     }
-    lidar_worker_cv_.notify_one();
-}
+    sensor_event_cv_.notify_one();
 
-void SlamSystem::LidarWorkerLoop() {
-    while (true) {
-        {
-            std::unique_lock<std::mutex> lock(lidar_worker_mutex_);
-            lidar_worker_cv_.wait(lock, [this]() { return stop_lidar_worker_ || lidar_work_pending_; });
-            if (stop_lidar_worker_) {
-                return;
-            }
-            lidar_work_pending_ = false;
-        }
+    if (sensor_worker_.joinable()) {
+        sensor_worker_.join();
+    }
 
-        ProcessReadyLidarFrames();
+    if (dropped_lidar_events_ > 0 || dropped_imu_events_ > 0) {
+        LOG(WARNING) << "async LIO event drops: LiDAR=" << dropped_lidar_events_
+                     << ", IMU=" << dropped_imu_events_;
     }
 }
 
-void SlamSystem::StopLidarWorker() {
-    {
-        std::lock_guard<std::mutex> lock(lidar_worker_mutex_);
-        stop_lidar_worker_ = true;
-    }
-    lidar_worker_cv_.notify_one();
-    if (lidar_worker_.joinable()) {
-        lidar_worker_.join();
-    }
-}
-
-void SlamSystem::HandleLidarResult() {
-    const auto processed_stamp = math::FromSec(lio_->GetState().timestamp_);
+void SlamSystem::HandleLidarResultLocked() {
+    const auto state = lio_->GetState();
+    const auto processed_stamp = math::FromSec(state.timestamp_);
+    const bool can_publish_ros = !options_.online_mode_ || rclcpp::ok();
 
     if (options_.log_pose_opt_) {
-        auto state = lio_->GetState();
         auto q = state.rot_.unit_quaternion();
-        
+
         char log_buf[256];
-        snprintf(log_buf, sizeof(log_buf), 
+        snprintf(log_buf, sizeof(log_buf),
                 "lio pose: [%.4f, %.4f, %.4f]\tq: [%.4f, %.4f, %.4f, %.4f]\tvelocity: [%.3f, %.3f, %.3f]m/s",
                 state.pos_.x(), state.pos_.y(), state.pos_.z(),
                 q.x(), q.y(), q.z(), q.w(),
                 state.vel_.x(), state.vel_.y(), state.vel_.z());
         LOG(INFO) << log_buf;
-
-        // printf("\rslam.cc:266] pose: [%.4f, %.4f, %.4f], q: [%.4f, %.4f, %.4f, %.4f], vel: [%.4f, %.4f, %.4f]           ", 
-        //        state.pos_.x(), state.pos_.y(), state.pos_.z(),
-        //        q.w(), q.x(), q.y(), q.z(),
-        //        state.vel_.x(), state.vel_.y(), state.vel_.z());
-        // fflush(stdout);
     }
+
     static uint8_t count = 0;
     if (nav_state_pub_ != nullptr) {
-        auto state = lio_->GetState();
         // 真正的回环后的位姿，而非EKF的里程计位姿
         SE3 pose_opt = lio_->GetOptPose();
         auto q_opt = pose_opt.unit_quaternion();
@@ -498,9 +665,11 @@ void SlamSystem::HandleLidarResult() {
         ns.velocity.z = state.vel_.z();
         ns.confidence = 1.0;
         ns.pose_is_ok = true;
-        nav_state_pub_->publish(ns);
+        if (can_publish_ros) {
+            nav_state_pub_->publish(ns);
+        }
 
-        if (tf_broadcaster_ != nullptr) {
+        if (tf_broadcaster_ != nullptr && can_publish_ros) {
             geometry_msgs::msg::TransformStamped tf_msg;
             tf_msg.header = ns.header;
             tf_msg.child_frame_id = "lidar_link";
@@ -511,7 +680,7 @@ void SlamSystem::HandleLidarResult() {
             tf_broadcaster_->sendTransform(tf_msg);
         }
 
-        if (odom_pub_ != nullptr) {
+        if (odom_pub_ != nullptr && can_publish_ros) {
             nav_msgs::msg::Odometry odom;
             odom.header = ns.header;
             odom.child_frame_id = "lidar_link";
@@ -522,16 +691,18 @@ void SlamSystem::HandleLidarResult() {
 
         if (options_.enable_path_rviz_ && path_pub_ != nullptr) {
             geometry_msgs::msg::PoseStamped ps;
-            if(count<10){
+            if (count < 10) {
                 LOG(INFO) << "publishing path pose: ["
-                          << ns.pose.position.x << ", " << ns.pose.position.y << ", " << ns.pose.position.z<< "]";
+                          << ns.pose.position.x << ", " << ns.pose.position.y << ", " << ns.pose.position.z << "]";
                 count++;
             }
             ps.header = ns.header;
             ps.pose = ns.pose;
             path_.header = ns.header;
             path_.poses.push_back(ps);
-            path_pub_->publish(path_);
+            if (can_publish_ros) {
+                path_pub_->publish(path_);
+            }
         }
     } else if (options_.enable_path_rviz_) {
         // 离线模式或未启用 pub_odom 时，手动维护 path_
@@ -557,9 +728,9 @@ void SlamSystem::HandleLidarResult() {
 
         path_.header = ps.header;
         path_.poses.push_back(ps);
-    } 
+    }
 
-    if (options_.enable_lidar_rviz_ && cloud_pub_ != nullptr) {
+    if (options_.enable_lidar_rviz_ && cloud_pub_ != nullptr && can_publish_ros) {
         auto scan_world = lio_->GetScanDownWorld();
         if (scan_world && !scan_world->empty()) {
             sensor_msgs::msg::PointCloud2 scan_msg;
@@ -593,9 +764,9 @@ void SlamSystem::HandleLidarResult() {
         ui_->UpdateKF(cur_kf_);
     }
 
-    if (map_pub_ != nullptr && options_.rviz_global_map_kf_interval_ > 0) {
+    if (map_pub_ != nullptr && can_publish_ros) {
         static int kf_count = 0;
-        if (kf_count++ % options_.rviz_global_map_kf_interval_ == 0) {
+        if (kf_count++ % 3 == 0) { // 每3个关键帧发布一个全局地图
             auto global_map = lio_->GetGlobalMap(!options_.with_loop_closing_);
             sensor_msgs::msg::PointCloud2 ros_map;
             pcl::toROSMsg(*global_map, ros_map);
@@ -604,15 +775,6 @@ void SlamSystem::HandleLidarResult() {
             map_pub_->publish(ros_map);
         }
     }
-}
-
-void SlamSystem::ProcessLidar(const livox_ros_driver2::msg::CustomMsg::SharedPtr& cloud) {
-    if (running_ == false) {
-        return;
-    }
-
-    lio_->ProcessPointCloud2(cloud);
-    ScheduleLidarProcessing();
 }
 
 void SlamSystem::Spin() {

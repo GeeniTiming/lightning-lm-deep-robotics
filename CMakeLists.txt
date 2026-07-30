@@ -61,10 +61,6 @@ install(DIRECTORY config
         DESTINATION lib/${PROJECT_NAME}/
 )
 
-install(DIRECTORY config launch
-        DESTINATION share/${PROJECT_NAME}/
-)
-
 add_subdirectory(thirdparty/livox_ros_driver)
 
 add_subdirectory(src)

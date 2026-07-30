@@ -2,7 +2,12 @@
 #define FASTER_LIO_LASER_MAPPING_H
 
 #include <pcl/filters/voxel_grid.h>
+#include <atomic>
 #include <condition_variable>
+#include <cstdint>
+#include <limits>
+#include <map>
+#include <mutex>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <thread>
 
@@ -65,9 +70,12 @@ class LaserMapping {
     RunStatus RunOnce();
     bool Run();
 
-    /// Used by event-driven callers to avoid polling RunOnce() on every IMU.
+    /// Used by event-driven callers to drain all scans covered by buffered IMU.
     bool ShouldProcessLidar();
     bool HasPendingLidar();
+
+    /// Finalize complete RoboSense time bins before an end-of-input map save.
+    void FlushPendingPointClouds();
 
     // callbacks of lidar and imu
     /// 处理ROS2的点云
@@ -99,7 +107,8 @@ class LaserMapping {
 
     /// 获取IMU状态
     NavState GetIMUState() const {
-        if (p_imu_->IsIMUInited()) {
+        std::lock_guard<std::mutex> lock(mtx_imu_state_);
+        if (imu_initialized_.load(std::memory_order_acquire)) {
             return kf_imu_.GetX();
         } else {
             NavState s;
@@ -141,7 +150,6 @@ class LaserMapping {
         po.y = p_global(1);
         po.z = p_global(2);
         po.intensity = pi.intensity;
-        po.timestamp = pi.timestamp;
     }
 
     void MapIncremental();
@@ -151,10 +159,13 @@ class LaserMapping {
     /// 创建关键帧
     void MakeKF();
 
-    void LogEstimatedExtrinsic();
-
-    /// Keep a broken sensor time base from growing the internal queue forever.
+    /// Buffer helpers. Callers must hold mtx_buffer_.
+    void EnqueueLidarCloud(CloudPtr cloud, double timestamp);
+    void ResolveRobosenseInputMode(bool force);
+    void BufferRobosenseCloud(CloudPtr cloud, double source_start_time);
+    void FinalizeRobosenseBins(bool force);
     void TrimLidarBuffer();
+    void TrimImuBuffer();
 
    private:
     Options options_;
@@ -190,12 +201,14 @@ class LaserMapping {
     std::vector<char> point_selected_surf_;  // selected points
     std::vector<Vec4f> plane_coef_;          // plane coeffs
 
-    std::mutex mtx_buffer_;
+    mutable std::mutex mtx_buffer_;
+    mutable std::mutex mtx_imu_state_;
+    std::mutex mtx_orientation_;
     std::deque<double> time_buffer_;
 
     std::deque<PointCloudType::Ptr> lidar_buffer_;
     std::deque<lightning::IMUPtr> imu_buffer_;
-    lightning::IMUPtr last_imu_ = nullptr;
+    lightning::IMUPtr orientation_imu_ = nullptr;
 
     /// options
     bool keep_first_imu_estimation_ = false;    // 在没有建立地图前，是否要使用前几帧的IMU状态
@@ -206,10 +219,37 @@ class LaserMapping {
     double first_lidar_time_ = 0.0;
     bool lidar_pushed_ = false;
 
+    enum class RobosenseInputMode { UNKNOWN, DIRECT_SCAN, REBATCH_POINTS };
+    struct RobosenseProbeFrame {
+        double header_time = 0.0;
+        double point_start_time = 0.0;
+        CloudPtr cloud;
+    };
+    RobosenseInputMode robosense_input_mode_ = RobosenseInputMode::UNKNOWN;
+    bool robosense_rebatch_enabled_ = true;
+    double robosense_scan_period_ = 0.1;
+    double robosense_rebatch_delay_ = 0.3;
+    double robosense_publish_time_threshold_ = 0.05;
+    size_t robosense_min_bin_points_ = 100;
+    size_t robosense_mode_probe_frames_ = 5;
+    std::deque<RobosenseProbeFrame> robosense_probe_frames_;
+    bool robosense_bin_origin_set_ = false;
+    double robosense_bin_origin_ = 0.0;
+    double robosense_latest_point_time_ = -1.0;
+    std::int64_t robosense_last_emitted_bin_ = std::numeric_limits<std::int64_t>::min();
+    std::map<std::int64_t, CloudPtr> robosense_bins_;
+    size_t robosense_emitted_bins_ = 0;
+    size_t robosense_dropped_bins_ = 0;
+    size_t robosense_late_points_ = 0;
+
     bool enable_skip_lidar_ = true;  // 雷达是否需要跳帧
     int skip_lidar_num_ = 5;         // 每隔多少帧跳一个雷达
     int skip_lidar_cnt_ = 0;
     size_t max_lidar_buffer_size_ = 20;
+    size_t max_imu_buffer_size_ = 4000;
+    double imu_buffer_duration_ = 5.0;
+    double imu_buffer_guard_time_ = 0.2;
+    std::atomic_bool imu_initialized_ = false;
 
     /// statistics and flags ///
     int scan_count_ = 0;
@@ -219,19 +259,10 @@ class LaserMapping {
     double lidar_mean_scantime_ = 0.0;
     int scan_num_ = 0;
     int effect_feat_num_ = 0, frame_num_ = 0;
-    double last_lidar_residual_median_sq_ = 0.0;
-    double last_lidar_residual_max_sq_ = 0.0;
 
     double last_lidar_time_ = 0;
 
     bool use_imu_orient_ = false;
-    int min_effective_points_ = 100;
-    double max_lidar_update_translation_ = 1.0;
-    double max_lidar_update_rotation_deg_ = 15.0;
-    double max_extrinsic_update_translation_ = 0.02;
-    double max_extrinsic_update_rotation_deg_ = 1.0;
-    int extrinsic_log_interval_ = 50;
-    int extrinsic_log_count_ = 0;
 
     ///////////////////////// EKF inputs and output ///////////////////////////////////////////////////////
     MeasureGroup measures_;  // sync IMU and lidar scan
