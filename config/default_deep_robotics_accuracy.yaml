@@ -14,7 +14,7 @@ fasterlio:
   time_scale: 1e-3
 
   skip_lidar_num: 0
-  point_filter_num: 6
+  point_filter_num: 4
   max_lidar_buffer_size: 20
   max_imu_buffer_size: 4000
   imu_buffer_duration: 5.0
@@ -26,11 +26,11 @@ fasterlio:
   robosense_mode_probe_frames: 5
   robosense_min_bin_points: 100
 
-  max_iteration: 4
-  filter_size_scan: 0.5
-  filter_size_map: 0.5
-  ivox_grid_resolution: 0.5
-  ivox_nearby_type: 18
+  max_iteration: 6
+  filter_size_scan: 0.294
+  filter_size_map: 0.294
+  ivox_grid_resolution: 0.294
+  ivox_nearby_type: 26
   esti_plane_threshold: 0.1
   use_aa: false
 
@@ -83,7 +83,7 @@ system:
   use_imu_orient: false
 
 loop_closing:
-  loop_kf_gap: 10
+  loop_kf_gap: 5
   min_id_interval: 20
   closest_id_th: 20
   max_range: 60.0
