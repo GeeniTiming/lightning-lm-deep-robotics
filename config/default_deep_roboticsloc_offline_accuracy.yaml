@@ -21,14 +21,14 @@ fasterlio:
   robosense_publish_time_threshold: 0.05
   robosense_mode_probe_frames: 5
   robosense_min_bin_points: 100
-  # 定位需要在 10 Hz 输入下实时完成；建图用的高精度参数不适合直接用于在线定位。
-  point_filter_num: 5 # 在线精度/实时性平衡配置
-  max_iteration: 4 # 将 IEKF 平均耗时控制在约 100 ms 内
+  # 离线定位优先精度，复用已验证达到约 1.6 cm APE 的高精度 LIO 参数。
+  point_filter_num: 4
+  max_iteration: 6
   # 0.5 m 会触发“点数少于原始点10%时退回0.1 m”的保护逻辑，反而显著变慢。
-  filter_size_scan: 0.3 # 当前帧体素降采样
-  filter_size_map: 0.3 # LIO 局部地图体素分辨率
+  filter_size_scan: 0.294
+  filter_size_map: 0.294
 
-  ivox_grid_resolution: 0.3
+  ivox_grid_resolution: 0.294
   ivox_nearby_type: 26
   esti_plane_threshold: 0.1        # default=0.1
 
@@ -56,7 +56,7 @@ g2p5:
 
 system:
   with_loop_closing: true # 是否需要回环检测
-  with_ui: true # 在线定位默认显示3D UI；无显示环境评测时设为 false
+  with_ui: false # 离线批处理默认不启动3D UI
   with_2dui: false # 是否需要2D UI
   with_g2p5: false # 是否需要栅格地图
   step_on_kf: false # 是否在关键帧处暂停

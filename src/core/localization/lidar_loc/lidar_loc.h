@@ -41,9 +41,13 @@ class LidarLoc {
         bool with_height_ = true;                      // 建图期间是否带有高度约束？
         bool force_2d_ = true;                         // 强制在2D空间
         float min_init_confidence_ = 0.1;              // 初始化时要求的最小分值
+        float min_tracking_confidence_ = 1.0;          // 跟踪阶段接受 NDT 结果的最低分值
         bool init_with_fp_ = true;                     // 是否使用功能点进行初始化
         bool enable_parking_static_ = false;           // 是否在静止时输出固定位置
         bool enable_icp_adjust_ = false;               // 是否使用icp调整ndt匹配结果提高定位精度
+        int ndt_num_threads_ = 4;                      // NDT OpenMP 线程数
+        int ndt_max_iterations_ = 4;                   // NDT 最大迭代次数
+        double ndt_resolution_ = 1.0;                  // 精匹配 NDT 分辨率
 
         /// 点云过滤
         float filter_z_min_ = -1.0;

@@ -5,6 +5,10 @@
 #ifndef LIGHTNING_LOC_SYSTEM_H
 #define LIGHTNING_LOC_SYSTEM_H
 
+#include <mutex>
+#include <vector>
+
+#include <geometry_msgs/msg/pose_stamped.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <rclcpp/rclcpp.hpp>
@@ -24,6 +28,7 @@ namespace lightning {
 
 namespace loc {
 class Localization;
+struct LocalizationResult;
 }
 
 class LocSystem {
@@ -43,6 +48,9 @@ class LocSystem {
     /// 初始化，地图路径在yaml里配置
     bool Init(const std::string& yaml_path);
 
+    /// 按配置中的初始位姿启动定位；未启用 use_init_pose 时使用单位位姿。
+    void Start();
+
     /// 设置初始化位姿
     void SetInitPose(const SE3& pose);
 
@@ -59,6 +67,8 @@ class LocSystem {
    private:
     /// 保存轨迹接口
     void SavePath(const srv::SavePath::Request::SharedPtr request, srv::SavePath::Response::SharedPtr response);
+    void PublishLocalizationResult(const loc::LocalizationResult& result);
+    void PublishDebugClouds(const builtin_interfaces::msg::Time& stamp);
 
     Options options_;
 
@@ -77,7 +87,10 @@ class LocSystem {
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_ = nullptr;
     rclcpp::Service<srv::SavePath>::SharedPtr savepath_service_ = nullptr;
     double last_map_pub_time_ = 0;
+    double last_path_pub_time_ = 0;
     nav_msgs::msg::Path path_;
+    std::vector<geometry_msgs::msg::PoseStamped> trajectory_;
+    std::mutex trajectory_mutex_;
 
     std::string imu_topic_;
     std::string cloud_topic_;

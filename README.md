@@ -179,7 +179,7 @@ command.
     ```
 
 2.  **Launch the Localization Node:**
-    *   Ensure `system.map_path` in your YAML config points to the folder containing the map (current default: `./data/office4f/`).
+    *   Ensure `system.map_path` in your YAML config points to the folder containing the map.
     *   **Run command:**
         ```bash
         ros2 run lightning run_loc_online --config ./src/lightning-lm-deep-robotics/config/default_deep_roboticsloc.yaml
@@ -188,9 +188,14 @@ command.
 ### Option B: Offline Localization
 Run localization on a bag file without real-time constraints to verify algorithm performance.
 ```bash
-ros2 run lightning run_loc_offline --config ./src/lightning-lm-deep-robotics/config/default_deep_roboticsloc.yaml --map_path ./data/office4f/ --input_bag [path_to_bag]
+ros2 run lightning run_loc_offline \
+  --config ./src/lightning-lm-deep-robotics/config/default_deep_roboticsloc_offline_accuracy.yaml \
+  --map_path ./data/office4f/ \
+  --input_bag [path_to_bag] \
+  --output_path ./data/localization_trajectory.txt
 ```
 Unlike online localization, `run_loc_offline` takes the map directory from `--map_path`; it does not use `system.map_path` as the map input.
+`--output_path` is optional and saves the fused map-frame trajectory in the same text format as the online `lightning/save_path` service.
 
 ## 6. M20 Hardware Deployment
 We test on the AOS(103) platform, which has ROS2_foxy already.

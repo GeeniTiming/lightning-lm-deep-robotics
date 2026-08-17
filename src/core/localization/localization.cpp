@@ -64,6 +64,13 @@ bool Localization::Init(const std::string& yaml_path, const std::string& global_
     options_.enable_lidar_odom_skip_ = yaml.GetValue<bool>("system", "enable_lidar_odom_skip");
     options_.lidar_odom_skip_num_ = yaml.GetValue<int>("system", "lidar_odom_skip_num");
     options_.loc_on_kf_ = yaml.GetValue<bool>("lidar_loc", "loc_on_kf");
+    options_.async_lidar_loc_ = yaml.GetValue<bool>("lidar_loc", "async_lidar_loc", false);
+    options_.map_odom_correction_gain_ =
+        yaml.GetValue<double>("lidar_loc", "map_odom_correction_gain", 0.05);
+    options_.map_odom_max_translation_jump_ =
+        yaml.GetValue<double>("lidar_loc", "map_odom_max_translation_jump", 0.5);
+    options_.map_odom_max_rotation_jump_deg_ =
+        yaml.GetValue<double>("lidar_loc", "map_odom_max_rotation_jump_deg", 15.0);
 
     lidar_odom_proc_cloud_.SetMaxSize(1);
     lidar_loc_proc_cloud_.SetMaxSize(1);
@@ -80,52 +87,9 @@ bool Localization::Init(const std::string& yaml_path, const std::string& global_
 
     if (options_.online_mode_) {
         lidar_odom_proc_cloud_.Start();
-        lidar_loc_proc_cloud_.Start();
-    }
-
-    /// TODO: 发布
-    pgo_->SetHighFrequencyGlobalOutputHandleFunction([this](const LocalizationResult& res) {
-        // if (loc_result_.timestamp_ > 0) {
-        //             double loc_fps = 1.0 / (res.timestamp_ - loc_result_.timestamp_);
-        //             // LOG_EVERY_N(INFO, 10) << "loc fps: " << loc_fps;
-        //         }
-
-        loc_result_ = res;
-
-        if (tf_callback_ && loc_result_.valid_) {
-            tf_callback_(loc_result_.ToGeoMsg());
+        if (options_.async_lidar_loc_) {
+            lidar_loc_proc_cloud_.Start();
         }
-
-        if (ui_) {
-            ui_->UpdateNavState(loc_result_.ToNavState());
-            ui_->UpdateRecentPose(loc_result_.pose_);
-        }
-    });
-
-    /// 预处理器
-    preprocess_.reset(new PointCloudPreprocess());
-    preprocess_->Blind() = yaml.GetValue<double>("fasterlio", "blind");
-    preprocess_->TimeScale() = yaml.GetValue<double>("fasterlio", "time_scale");
-    int lidar_type = yaml.GetValue<int>("fasterlio", "lidar_type");
-    preprocess_->NumScans() = yaml.GetValue<int>("fasterlio", "scan_line");
-    preprocess_->PointFilterNum() = yaml.GetValue<int>("fasterlio", "point_filter_num");
-
-    LOG(INFO) << "lidar_type " << lidar_type;
-    if (lidar_type == 1) {
-        preprocess_->SetLidarType(LidarType::AVIA);
-        LOG(INFO) << "Using AVIA Lidar";
-    } else if (lidar_type == 2) {
-        preprocess_->SetLidarType(LidarType::VELO32);
-        LOG(INFO) << "Using Velodyne 32 Lidar";
-    } else if (lidar_type == 3) {
-        preprocess_->SetLidarType(LidarType::OUST64);
-        LOG(INFO) << "Using OUST 64 Lidar";
-    } 
-    else if (lidar_type == 4) {
-        preprocess_->SetLidarType(LidarType::RoboSense);
-        LOG(INFO) << "Using RoboSense Lidar";
-    } else {
-        LOG(WARNING) << "unknown lidar_type";
     }
 
     return true;
@@ -137,15 +101,14 @@ void Localization::ProcessLidarMsg(const sensor_msgs::msg::PointCloud2::SharedPt
         return;
     }
 
-    // 串行模式
-    CloudPtr laser_cloud(new PointCloudType);
-    preprocess_->Process(cloud, laser_cloud);
-    laser_cloud->header.stamp = cloud->header.stamp.sec * 1e9 + cloud->header.stamp.nanosec;
-
+    // Keep the original ROS message until LaserMapping has inspected the
+    // RoboSense header/point timestamps.  Converting to CloudPtr here used to
+    // bypass its publish-time detection and physical-scan rebatching.
+    lio_->ProcessPointCloud2(cloud);
     if (options_.online_mode_) {
-        lidar_odom_proc_cloud_.AddMessage(laser_cloud);
+        ScheduleLidarOdomDrain();
     } else {
-        LidarOdomProcCloud(laser_cloud);
+        DrainLidarOdom();
     }
 }
 
@@ -155,15 +118,11 @@ void Localization::ProcessLivoxLidarMsg(const livox_ros_driver2::msg::CustomMsg:
         return;
     }
 
-    // 串行模式
-    CloudPtr laser_cloud(new PointCloudType);
-    preprocess_->Process(cloud, laser_cloud);
-    laser_cloud->header.stamp = cloud->header.stamp.sec * 1e9 + cloud->header.stamp.nanosec;
-
+    lio_->ProcessPointCloud2(cloud);
     if (options_.online_mode_) {
-        lidar_odom_proc_cloud_.AddMessage(laser_cloud);
+        ScheduleLidarOdomDrain();
     } else {
-        LidarOdomProcCloud(laser_cloud);
+        DrainLidarOdom();
     }
 }
 
@@ -172,16 +131,48 @@ void Localization::LidarOdomProcCloud(CloudPtr cloud) {
         return;
     }
 
-    /// NOTE: 在NCLT这种数据集中，lio内部是有缓存的，它拿到的点云不一定是最新时刻的点云
-    lio_->ProcessPointCloud2(cloud);
-    if (!lio_->Run()) {
-        return;
+    // CloudPtr is retained for callers that already provide preprocessed
+    // clouds. Online ROS input now queues only a nullptr wake-up token; the
+    // actual scans live in LaserMapping's timestamp-aware buffer.
+    if (cloud) {
+        lio_->ProcessPointCloud2(cloud);
     }
+    DrainLidarOdom();
+
+    lio_drain_scheduled_.store(false, std::memory_order_release);
+    if (lio_->ShouldProcessLidar()) {
+        ScheduleLidarOdomDrain();
+    }
+}
+
+void Localization::ScheduleLidarOdomDrain() {
+    bool expected = false;
+    if (lio_drain_scheduled_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+        lidar_odom_proc_cloud_.AddMessage(nullptr);
+    }
+}
+
+void Localization::DrainLidarOdom() {
+    std::lock_guard<std::mutex> lock(lio_processing_mutex_);
+    while (true) {
+        const auto status = lio_->RunOnce();
+        if (status == LaserMapping::RunStatus::NO_READY_SCAN) {
+            break;
+        }
+        if (status == LaserMapping::RunStatus::FRAME_CONSUMED) {
+            continue;
+        }
+        HandleLidarOdomOutput();
+    }
+}
+
+void Localization::HandleLidarOdomOutput() {
 
     auto lo_state = lio_->GetState();
 
     lidar_loc_->ProcessLO(lo_state);
     pgo_->ProcessLidarOdom(lo_state);
+    PublishCorrectedLidarOdom(lo_state);
 
     // LOG(INFO) << "LO pose: " << std::setprecision(12) << lo_state.timestamp_ << " "
     //           << lo_state.GetPose().translation().transpose();
@@ -201,16 +192,28 @@ void Localization::LidarOdomProcCloud(CloudPtr cloud) {
         lio_kf_ = kf;
 
         auto scan = lio_->GetScanUndist();
+        if (!scan || scan->empty()) {
+            return;
+        }
+        const double scan_duration = scan->points.back().timestamp * 1e-3;
+        const double scan_start_time = lo_state.timestamp_ - scan_duration;
+        scan->header.stamp = static_cast<std::uint64_t>(std::llround(scan_start_time * 1e9));
 
-        if (options_.online_mode_) {
+        if (options_.online_mode_ && options_.async_lidar_loc_) {
             lidar_loc_proc_cloud_.AddMessage(scan);
         } else {
             LidarLocProcCloud(scan);
         }
     } else {
         auto scan = lio_->GetScanUndist();
+        if (!scan || scan->empty()) {
+            return;
+        }
+        const double scan_duration = scan->points.back().timestamp * 1e-3;
+        const double scan_start_time = lo_state.timestamp_ - scan_duration;
+        scan->header.stamp = static_cast<std::uint64_t>(std::llround(scan_start_time * 1e9));
 
-        if (options_.online_mode_) {
+        if (options_.online_mode_ && options_.async_lidar_loc_) {
             lidar_loc_proc_cloud_.AddMessage(scan);
         } else {
             LidarLocProcCloud(scan);
@@ -222,6 +225,7 @@ void Localization::LidarLocProcCloud(CloudPtr scan_undist) {
     lidar_loc_->ProcessCloud(scan_undist);
 
     auto res = lidar_loc_->GetLocalizationResult();
+    UpdateMapFromOdom(res);
     pgo_->ProcessLidarLoc(res);
 
     if (ui_) {
@@ -252,31 +256,15 @@ void Localization::ProcessIMUMsg(IMUPtr imu) {
 
     /// 里程计处理IMU
     lio_->ProcessIMU(imu);
-
-    /// 这里需要 IMU predict，否则没法process DR了
-    auto dr_state = lio_->GetIMUState();
-
-    if (!dr_state.pose_is_ok_) {
-        return;
+    if (options_.online_mode_ && lio_->ShouldProcessLidar()) {
+        ScheduleLidarOdomDrain();
     }
 
-    // /// 停车判定
-    // constexpr auto kThVbrbStill = 0.05;  // 0.08;
-    // constexpr auto kThOmegaStill = 0.05;
-
-    // if (dr_state.GetVel().norm() < kThVbrbStill && imu->angular_velocity.norm() < kThOmegaStill) {
-    //     dr_state.is_parking_ = true;
-    //     dr_state.SetVel(Vec3d::Zero());
-    // }
-
-    /// 如果没有odm, 用lio替代DR
-
-    // LOG(INFO) << "dr state: " << std::setprecision(12) << dr_state.timestamp_ << " "
-    //           << dr_state.GetPose().translation().transpose()
-    //           << ", q=" << dr_state.GetPose().unit_quaternion().coeffs().transpose();
-
-    lidar_loc_->ProcessDR(dr_state);
-    pgo_->ProcessDR(dr_state);
+    // Do not publish/fuse GetIMUState() here.  In online mode the scan worker
+    // deliberately processes buffered lidar asynchronously; the IMU receive
+    // time may therefore be seconds ahead of the last corrected LIO state.
+    // The stable scan-corrected state is forwarded from
+    // HandleLidarOdomOutput().
 }
 
 // void Localization::ProcessOdomMsg(const nav_msgs::msg::Odometry::SharedPtr odom_msg) {
@@ -312,13 +300,21 @@ void Localization::ProcessIMUMsg(IMUPtr imu) {
 // }
 
 void Localization::Finish() {
+    FlushPendingLidar();
+    lidar_odom_proc_cloud_.Quit();
+    lidar_loc_proc_cloud_.Quit();
     lidar_loc_->Finish();
     if (ui_) {
         ui_->Quit();
     }
+}
 
-    lidar_loc_proc_cloud_.Quit();
-    lidar_odom_proc_cloud_.Quit();
+void Localization::FlushPendingLidar() {
+    if (!lio_) {
+        return;
+    }
+    lio_->FlushPendingPointClouds();
+    DrainLidarOdom();
 }
 
 void Localization::SetExternalPose(const Eigen::Quaterniond& q, const Eigen::Vector3d& t) {
@@ -331,8 +327,108 @@ void Localization::SetExternalPose(const Eigen::Quaterniond& q, const Eigen::Vec
     if (lio_) {
         lio_->SetInitPose(SE3(q, t));
     }
+    {
+        std::lock_guard<std::mutex> fusion_lock(fusion_mutex_);
+        lio_pose_history_.clear();
+        map_from_odom_initialized_ = false;
+        latest_lidar_loc_result_ = LocalizationResult();
+    }
+}
+
+void Localization::UpdateMapFromOdom(const LocalizationResult& lidar_loc_result) {
+    if (!lidar_loc_result.lidar_loc_valid_) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(fusion_mutex_);
+    if (map_from_odom_initialized_ &&
+        (!lidar_loc_result.lidar_loc_odom_error_normal_ ||
+         !lidar_loc_result.lidar_loc_smooth_flag_)) {
+        return;
+    }
+    SE3 odom_pose_at_loc;
+    NavState best_match;
+    const bool interpolated = math::PoseInterp<NavState>(
+        lidar_loc_result.timestamp_, lio_pose_history_,
+        [](const NavState& state) { return state.timestamp_; },
+        [](const NavState& state) { return state.GetPose(); },
+        odom_pose_at_loc, best_match, 0.5);
+    if (!interpolated) {
+        LOG(WARNING) << "cannot update map->odom: no LIO pose near lidar localization time "
+                     << std::setprecision(16) << lidar_loc_result.timestamp_;
+        return;
+    }
+
+    const SE3 measured_map_from_odom = lidar_loc_result.pose_ * odom_pose_at_loc.inverse();
+    if (!map_from_odom_initialized_) {
+        map_from_odom_ = measured_map_from_odom;
+        map_from_odom_initialized_ = true;
+        LOG(INFO) << "initialized stable map->odom correction: "
+                  << map_from_odom_.translation().transpose();
+    } else {
+        const SE3 delta = map_from_odom_.inverse() * measured_map_from_odom;
+        const double translation_jump = delta.translation().norm();
+        const double rotation_jump_deg = delta.so3().log().norm() * 180.0 / M_PI;
+        if (translation_jump > options_.map_odom_max_translation_jump_ ||
+            rotation_jump_deg > options_.map_odom_max_rotation_jump_deg_) {
+            LOG(WARNING) << "reject map->odom correction jump: translation=" << translation_jump
+                         << " m, rotation=" << rotation_jump_deg << " deg";
+            return;
+        }
+
+        const double gain = std::clamp(options_.map_odom_correction_gain_, 0.0, 1.0);
+        map_from_odom_ = map_from_odom_ * SE3::exp(gain * delta.log());
+    }
+    latest_lidar_loc_result_ = lidar_loc_result;
+    latest_lidar_loc_result_.valid_ = true;
+}
+
+void Localization::PublishCorrectedLidarOdom(const NavState& lio_state) {
+    LocalizationResult result;
+    bool ready = false;
+    {
+        std::lock_guard<std::mutex> lock(fusion_mutex_);
+        lio_pose_history_.push_back(lio_state);
+        while (lio_pose_history_.size() > 1000) {
+            lio_pose_history_.pop_front();
+        }
+
+        if (map_from_odom_initialized_) {
+            result = latest_lidar_loc_result_;
+            result.timestamp_ = lio_state.timestamp_;
+            result.pose_ = map_from_odom_ * lio_state.GetPose();
+            result.valid_ = true;
+            result.status_ = LocalizationStatus::GOOD;
+            result.rel_pose_set_ = true;
+            result.rel_pose_ = lio_state.GetPose();
+            result.vel_b_ = lio_state.GetRot().inverse() * lio_state.GetVel();
+            ready = true;
+        }
+    }
+
+    if (ready) {
+        EmitLocalizationResult(result);
+    }
+}
+
+void Localization::EmitLocalizationResult(const LocalizationResult& result) {
+    loc_result_ = result;
+    if (tf_callback_ && loc_result_.valid_) {
+        tf_callback_(loc_result_.ToGeoMsg());
+    }
+    if (localization_result_callback_ && loc_result_.valid_) {
+        localization_result_callback_(loc_result_);
+    }
+    if (ui_) {
+        ui_->UpdateNavState(loc_result_.ToNavState());
+        ui_->UpdateRecentPose(loc_result_.pose_);
+    }
 }
 
 void Localization::SetTFCallback(Localization::TFCallback&& callback) { tf_callback_ = callback; }
+
+void Localization::SetLocalizationResultCallback(LocalizationResultCallback&& callback) {
+    localization_result_callback_ = std::move(callback);
+}
 
 }  // namespace lightning::loc

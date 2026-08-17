@@ -1,5 +1,7 @@
 #pragma once
 
+#include <deque>
+
 #include "geometry_msgs/msg/transform_stamped.hpp"
 #include "std_msgs/msg/int32.hpp"
 
@@ -39,6 +41,10 @@ class Localization {
         bool enable_lidar_loc_rviz_ = false;   // 是否允许调试用rviz
         int lidar_loc_skip_num_ = 4;           // 如果允许跳帧，跳多少帧
         bool loc_on_kf_ = false;
+        bool async_lidar_loc_ = false;          // 在线时是否异步执行地图匹配
+        double map_odom_correction_gain_ = 0.05;
+        double map_odom_max_translation_jump_ = 0.5;
+        double map_odom_max_rotation_jump_deg_ = 15.0;
     };
 
     Localization(Options options = Options());
@@ -71,6 +77,9 @@ class Localization {
     /// 结束，保存临时地图
     void Finish();
 
+    /// Finalize delayed RoboSense bins and drain every LiDAR frame covered by IMU.
+    void FlushPendingLidar();
+
     /// 获取激光的状态
     NavState GetState() const { return lio_->GetState(); }
 
@@ -82,11 +91,13 @@ class Localization {
     void LidarLocProcCloud(CloudPtr);
 
     using TFCallback = std::function<void(const geometry_msgs::msg::TransformStamped& odom)>;
+    using LocalizationResultCallback = std::function<void(const LocalizationResult& result)>;
     using LocStateCallback = std::function<void(const std_msgs::msg::Int32& state)>;
     using PointcloudBodyCallback = std::function<void(const sensor_msgs::msg::PointCloud2& pointcloud)>;
     using PointcloudWorldCallback = std::function<void(const sensor_msgs::msg::PointCloud2& pointcloud)>;
 
     void SetTFCallback(TFCallback&& callback);
+    void SetLocalizationResultCallback(LocalizationResultCallback&& callback);
 
     // void SetPathCallback(std::function<void(const nav_msgs::msg::Path& path)>&& callback);
     // void SetPointcloudWorldCallback(std::function<void(const sensor_msgs::msg::PointCloud2& pointcloud)>&& callback);
@@ -99,18 +110,25 @@ class Localization {
     std::mutex global_mutex_;  // 防止处理过程中被重复init
     Options options_;
 
-    /// 预处理
-    std::shared_ptr<PointCloudPreprocess> preprocess_ = nullptr;  // point cloud preprocess
-
     /// 前端
     std::shared_ptr<LaserMapping> lio_ = nullptr;
     Keyframe::Ptr lio_kf_ = nullptr;
+    std::mutex lio_processing_mutex_;
+    std::atomic_bool lio_drain_scheduled_ = false;
 
     // ui
     std::shared_ptr<ui::PangolinWindow> ui_ = nullptr;
 
     // pose graph
     std::shared_ptr<PGO> pgo_ = nullptr;
+
+    // Stable online fusion: lidar localization estimates map->odom while
+    // scan-corrected LIO supplies odom->lidar at the physical scan rate.
+    std::mutex fusion_mutex_;
+    std::deque<NavState> lio_pose_history_;
+    SE3 map_from_odom_;
+    bool map_from_odom_initialized_ = false;
+    LocalizationResult latest_lidar_loc_result_;
 
     // lidar localization
     std::shared_ptr<LidarLoc> lidar_loc_;
@@ -124,6 +142,7 @@ class Localization {
 
     /// 框架相关
     TFCallback tf_callback_;
+    LocalizationResultCallback localization_result_callback_;
     LocStateCallback loc_state_callback_;
     PointcloudBodyCallback pointcloud_body_callback_;
     PointcloudWorldCallback pointcloud_world_callback_;
@@ -132,6 +151,13 @@ class Localization {
     double last_imu_time_ = 0;
     double last_odom_time_ = 0;
     double last_cloud_time_ = 0;
+
+    void ScheduleLidarOdomDrain();
+    void DrainLidarOdom();
+    void HandleLidarOdomOutput();
+    void UpdateMapFromOdom(const LocalizationResult& lidar_loc_result);
+    void PublishCorrectedLidarOdom(const NavState& lio_state);
+    void EmitLocalizationResult(const LocalizationResult& result);
 };
 }  // namespace loc
 

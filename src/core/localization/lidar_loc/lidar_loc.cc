@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cmath>
 #include <execution>
 
 #include <pcl/common/transforms.h>
@@ -61,6 +62,8 @@ bool LidarLoc::Init(const std::string& config_path) {
     options_.update_kf_dis_ = yaml.GetValue<double>("lidar_loc", "update_kf_dis");
     options_.update_lidar_loc_score_ = yaml.GetValue<double>("lidar_loc", "update_lidar_loc_score");
     options_.min_init_confidence_ = yaml.GetValue<float>("lidar_loc", "min_init_confidence");
+    options_.min_tracking_confidence_ =
+        yaml.GetValue<float>("lidar_loc", "min_tracking_confidence", 1.0f);
 
     options_.filter_z_min_ = yaml.GetValue<double>("lidar_loc", "filter_z_min");
     options_.filter_z_max_ = yaml.GetValue<double>("lidar_loc", "filter_z_max");
@@ -73,6 +76,10 @@ bool LidarLoc::Init(const std::string& config_path) {
     options_.enable_icp_adjust_ = yaml.GetValue<bool>("lidar_loc", "enable_icp_adjust");
     options_.with_height_ = yaml.GetValue<bool>("loop_closing", "with_height");
     options_.try_self_extrap_ = yaml.GetValue<bool>("lidar_loc", "try_self_extrap");
+    options_.force_2d_ = yaml.GetValue<bool>("lidar_loc", "force_2d", options_.force_2d_);
+    options_.ndt_num_threads_ = yaml.GetValue<int>("lidar_loc", "ndt_num_threads", 4);
+    options_.ndt_max_iterations_ = yaml.GetValue<int>("lidar_loc", "ndt_max_iterations", 4);
+    options_.ndt_resolution_ = yaml.GetValue<double>("lidar_loc", "ndt_resolution", 1.0);
 
     lidar_loc::grid_search_angle_step = yaml.GetValue<double>("lidar_loc", "grid_search_angle_step");
     lidar_loc::grid_search_angle_range = yaml.GetValue<double>("lidar_loc", "grid_search_angle_range");
@@ -361,11 +368,11 @@ bool LidarLoc::TryOtherSolution(CloudPtr input, SE3& pose) {
 
 bool LidarLoc::UpdateGlobalMap() {
     NDTType::Ptr ndt(new NDTType());
-    ndt->setResolution(1.0);
+    ndt->setResolution(options_.ndt_resolution_);
     ndt->setNeighborhoodSearchMethod(pclomp::DIRECT7);
     ndt->setStepSize(0.1);
-    ndt->setMaximumIterations(4);
-    ndt->setNumThreads(4);
+    ndt->setMaximumIterations(options_.ndt_max_iterations_);
+    ndt->setNumThreads(options_.ndt_num_threads_);
 
     map_->SetNewTargetForNDT(ndt);
     ndt->initCompute();
@@ -378,8 +385,8 @@ bool LidarLoc::UpdateGlobalMap() {
         ndt_rough->setResolution(5.0);
         ndt_rough->setNeighborhoodSearchMethod(pclomp::DIRECT7);
         ndt_rough->setStepSize(0.1);
-        ndt_rough->setMaximumIterations(4);
-        ndt_rough->setNumThreads(4);
+        ndt_rough->setMaximumIterations(options_.ndt_max_iterations_);
+        ndt_rough->setNumThreads(options_.ndt_num_threads_);
 
         map_->SetNewTargetForNDT(ndt_rough);
         // ndt_rough->initCompute();
@@ -696,10 +703,10 @@ void LidarLoc::Align(const CloudPtr& input) {
         UL lock(result_mutex_);
         localization_result_.timestamp_ = current_timestamp_;
         localization_result_.confidence_ = fitness_score;
-        if (match_fail_count_ < 100) {
+        if (loc_success) {
             localization_result_.lidar_loc_valid_ = true;
             localization_result_.status_ = LocalizationStatus::GOOD;
-        } else if (match_fail_count_ >= 100 && match_fail_count_ < 300) {
+        } else if (match_fail_count_ < 300) {
             localization_result_.lidar_loc_valid_ = false;
             localization_result_.status_ = LocalizationStatus::FOLLOWING_DR;
         } else {
@@ -831,11 +838,9 @@ bool LidarLoc::Localize(SE3& pose, double& confidence, CloudPtr input, CloudPtr 
     trans = ndt->getFinalTransformation();
     confidence = ndt->getTransformationProbability();
 
-    if (loc_inited_ == false && confidence > options_.min_init_confidence_) {
-        loc_success = true;
-    } else {
-        loc_success = true;
-    }
+    const double confidence_threshold =
+        loc_inited_ ? options_.min_tracking_confidence_ : options_.min_init_confidence_;
+    loc_success = ndt->hasConverged() && std::isfinite(confidence) && confidence > confidence_threshold;
 
     if (options_.enable_icp_adjust_ && loc_inited_) {
         Eigen::Matrix4f adjust_trans;

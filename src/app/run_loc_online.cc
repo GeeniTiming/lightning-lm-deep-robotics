@@ -33,12 +33,7 @@ int main(int argc, char** argv) {
         LOG(ERROR) << "failed to init loc";
     }
 
-    /// 如果没有设置初始位姿，则从0开始
-    if (opt.use_init_pose_) {
-        loc.SetInitPose(opt.init_pose_);
-    } else {
-        loc.SetInitPose(SE3());
-    }
+    loc.Start();
     loc.Spin();
 
     rclcpp::shutdown();
