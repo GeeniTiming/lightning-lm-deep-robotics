@@ -86,6 +86,12 @@ class Localization {
     std::shared_ptr<LaserMapping> GetLIO() { return lio_; }
     std::shared_ptr<LidarLoc> GetLidarLoc() { return lidar_loc_; }
 
+    /// 当前 map->odom 校正量（把 LIO odom 系点云变换到 map 系用）
+    SE3 GetMapFromOdom() {
+        std::lock_guard<std::mutex> lock(fusion_mutex_);
+        return map_from_odom_;
+    }
+
     /// 异步处理函数
     void LidarOdomProcCloud(CloudPtr);
     void LidarLocProcCloud(CloudPtr);

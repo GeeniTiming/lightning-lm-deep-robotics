@@ -9,6 +9,7 @@
 #include "core/lightning_math.hpp"
 #include "core/localization/localization.h"
 #include "core/localization/lidar_loc/lidar_loc.h"
+#include <pcl/common/transforms.h>
 #include "io/yaml_io.h"
 #include "wrapper/ros_utils.h"
 
@@ -234,8 +235,10 @@ void LocSystem::PublishDebugClouds(const builtin_interfaces::msg::Time& stamp) {
     if (cloud_pub_) {
         auto scan_world = loc_->GetLIO()->GetScanDownWorld();
         if (scan_world && !scan_world->empty()) {
+            CloudPtr scan_map(new PointCloudType);
+            pcl::transformPointCloud(*scan_world, *scan_map, loc_->GetMapFromOdom().matrix());
             sensor_msgs::msg::PointCloud2 scan_msg;
-            pcl::toROSMsg(*scan_world, scan_msg);
+            pcl::toROSMsg(*scan_map, scan_msg);
             scan_msg.header.frame_id = "map";
             scan_msg.header.stamp = stamp;
             cloud_pub_->publish(scan_msg);
