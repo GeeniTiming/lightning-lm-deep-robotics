@@ -298,6 +298,7 @@ LaserMapping::RunStatus LaserMapping::RunOnce() {
             PointBodyToWorld(scan_undistort_->points[i], scan_down_world_->points[i]);
         }
         ivox_->AddPoints(scan_down_world_->points);
+        scan_down_world_snapshot_.Publish(*scan_down_world_);
 
         first_lidar_time_ = measures_.lidar_end_time_;
         state_point_.timestamp_ = lidar_end_time_;
@@ -391,6 +392,7 @@ LaserMapping::RunStatus LaserMapping::RunOnce() {
 
     // update local map
     Timer::Evaluate([&, this]() { MapIncremental(); }, "    Incremental Mapping");
+    scan_down_world_snapshot_.Publish(*scan_down_world_);
     LOG(INFO) << "[ mapping ]: In num: " << scan_undistort_->points.size() << " down " << cur_pts
               << " Map grid num: " << ivox_->NumValidGrids() << " effect num : " << effect_feat_num_;
     // printf("\rlaser_mapping.cc:251] [ mapping ]: In num: %lu down %d Map grid num: %lu effect num : %d            ",
