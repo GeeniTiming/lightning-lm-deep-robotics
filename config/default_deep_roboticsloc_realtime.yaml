@@ -22,7 +22,7 @@ fasterlio:
   blind: 0.5                # 盲区，小于盲区距离的不会处理
   time_scale: 1e-3             # 兼容不同数据集的时间单位，仅对Velodyne LiDAR(lidar_type=2)生效
 
-  skip_lidar_num: 2 # 每2帧执行一次完整LIO更新；10Hz输入时目标约5Hz，需实测负载和消息间隔
+  skip_lidar_num: 4 # 点云跳帧。1=隔帧LIO（中间帧位姿由IMU递推），减半计算量保证实时；定位精度略有下降
   max_lidar_buffer_size: 32 # 计算跟不上时尽早丢旧帧，降低滞后感
   max_imu_buffer_size: 4000
   imu_buffer_duration: 5.0
