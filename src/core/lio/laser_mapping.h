@@ -12,6 +12,7 @@
 #include <thread>
 
 #include "common/eigen_types.h"
+#include "common/cloud_snapshot.h"
 #include "common/imu.h"
 #include "common/keyframe.h"
 #include "common/options.h"
@@ -118,7 +119,7 @@ class LaserMapping {
     }
 
     CloudPtr GetScanUndist() const { return scan_undistort_; }
-    CloudPtr GetScanDownWorld() const { return scan_down_world_; }
+    CloudPtr GetScanDownWorld() const { return scan_down_world_snapshot_.Copy(); }
     pcl::VoxelGrid<PointType>& GetVoxelFilter() { return voxel_scan_; }
 
     /// 获取最新的点云
@@ -192,6 +193,7 @@ class LaserMapping {
     CloudPtr scan_undistort_{new PointCloudType()};   // scan after undistortion
     CloudPtr scan_down_body_{new PointCloudType()};   // downsampled scan in body
     CloudPtr scan_down_world_{new PointCloudType()};  // downsampled scan in world
+    CloudSnapshot scan_down_world_snapshot_;  // immutable completed frame for concurrent readers
     std::vector<PointVector> nearest_points_;         // nearest points of current scan
     std::vector<Vec4f> corr_pts_;                     // inlier pts
     std::vector<Vec4f> corr_norm_;                    // inlier plane norms
